@@ -11,6 +11,7 @@ import urllib.parse
 from pathlib import Path
 
 from vision_matcher import fetch_and_check, check_image_matches
+import platforms
 
 # ══════════════════════════════════════════════
 #  브라우저 실행 (여러 방법 순서대로 시도)
@@ -182,6 +183,64 @@ def clean_url(url: str) -> str:
 def get_base_url(url: str) -> str:
     p = urllib.parse.urlparse(url)
     return f"{p.scheme}://{p.netloc}"
+
+
+def _extract_title_from_html(html: str, url: str) -> str:
+    """HTML에서 페이지 제목 추출 (og:title → <title> → URL 경로 순)"""
+    # og:title (속성 순서 두 가지)
+    for pattern in [
+        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\'<>]+)["\']',
+        r'<meta[^>]+content=["\']([^"\'<>]+)["\'][^>]+property=["\']og:title["\']',
+    ]:
+        m = re.search(pattern, html, re.I)
+        if m:
+            t = m.group(1).strip()
+            if t:
+                return t
+    # <title>
+    m = re.search(r'<title[^>]*>([^<]+)</title>', html, re.I)
+    if m:
+        t = re.split(r'\s*[|\-–]\s*', m.group(1))[0].strip()
+        if t:
+            return t
+    # URL 마지막 경로 세그먼트
+    path = urllib.parse.urlparse(url).path.rstrip('/')
+    return path.split('/')[-1] or 'page'
+
+
+async def _get_page_title(page, url: str) -> str:
+    """브라우저 페이지에서 제목 추출 (og:title → page.title() → URL 순)"""
+    try:
+        t = await page.evaluate(
+            "() => { const m = document.querySelector('meta[property=\"og:title\"],"
+            "meta[name=\"og:title\"]'); return m ? m.content : ''; }"
+        )
+        if t and t.strip():
+            return t.strip()
+    except Exception:
+        pass
+    try:
+        t = await page.title()
+        if t:
+            t = re.split(r'\s*[|\-–]\s*', t)[0].strip()
+            if t:
+                return t
+    except Exception:
+        pass
+    path = urllib.parse.urlparse(url).path.rstrip('/')
+    return path.split('/')[-1] or 'page'
+
+
+def _make_subdir(base: Path, platform_name: str, title: str) -> Path:
+    """
+    base / {플랫폼}_{상품명} 폴더 생성 후 반환.
+    이미 존재하면 그대로 사용 (재다운로드 시 덮어쓰기).
+    """
+    parts = [p for p in [platform_name, title] if p]
+    folder = sanitize("_".join(parts))[:60] if parts else "downloaded"
+    target = base / folder
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def normalize_img_url(url: str) -> str:
@@ -562,6 +621,19 @@ async def extract_all_images(page, log_fn) -> list:
     return urls
 
 
+async def _prewarm_browser(page, prewarm_url: str, log_fn):
+    """
+    목표 사이트의 루트 도메인을 먼저 방문해 초기 쿠키/세션 획득.
+    네이버처럼 쿠키 없으면 로그인 페이지로 보내는 사이트에 필수.
+    """
+    try:
+        log_fn(f"  사전 방문: {prewarm_url}")
+        await page.goto(prewarm_url, wait_until="domcontentloaded", timeout=20000)
+        await page.wait_for_timeout(2500)
+    except Exception as e:
+        log_fn(f"  사전 방문 실패 (무시): {e}")
+
+
 async def goto_and_wait(page, url: str, log_fn):
     """
     페이지 이동 후 콘텐츠 렌더링까지 확실하게 기다림.
@@ -743,11 +815,12 @@ async def click_next_page(page) -> bool:
 #  네이버 스마트스토어 전용 직접 파싱
 # ══════════════════════════════════════════════
 
-def _smartstore_fetch_images(url: str, log_fn) -> list:
+def _smartstore_fetch_images(url: str, log_fn) -> tuple:
     """
     requests로 HTML 직접 수신 → __NEXT_DATA__ + detailContents 파싱.
     headless 브라우저 탐지 완전 우회.
     서버는 JS 실행 안 하므로 일반 HTTP 클라이언트와 동일하게 응답.
+    반환: (이미지URL 리스트, 원본 HTML 문자열)
     """
     headers = {
         "User-Agent": (
@@ -791,7 +864,14 @@ def _smartstore_fetch_images(url: str, log_fn) -> list:
     try:
         res = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
         html = res.text
-        log_fn(f"  직접 요청: HTTP {res.status_code}, {len(html):,}자")
+        log_fn(f"  직접 요청: HTTP {res.status_code}, {len(html):,}자, 최종URL: {res.url[:80]}")
+
+        # ── 로그인 리디렉트 감지 ───────────────────────
+        # 상품 페이지엔 반드시 __NEXT_DATA__가 있음
+        # 없으면 로그인 페이지나 에러 페이지로 리디렉트된 것
+        if "__NEXT_DATA__" not in html:
+            log_fn("  상품 데이터 없음 (로그인/차단 페이지 감지) → 브라우저 모드 필요")
+            return [], html
 
         # ── 1. __NEXT_DATA__ JSON 전체 순회 ───────────
         m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
@@ -821,8 +901,9 @@ def _smartstore_fetch_images(url: str, log_fn) -> list:
 
     except Exception as e:
         log_fn(f"  직접 요청 실패: {e}")
+        return [], ""
 
-    return images
+    return images, html
 
 
 # ══════════════════════════════════════════════
@@ -836,33 +917,45 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
     url = clean_url(url)
     base_url = get_base_url(url)
 
-    # ── 네이버 스마트스토어: 브라우저 없이 직접 파싱 ──
+    # ── 플랫폼 감지 ───────────────────────────────────
+    platform_name = platforms.get_platform_name(url)
+    prewarm_url   = platforms.get_prewarm_url(url)
+    if platform_name:
+        log_fn(f"플랫폼 감지: {platform_name}")
+
+    # ── 네이버 스마트스토어: 직접 파싱 우선 시도 ─────
     if "smartstore.naver.com" in url:
-        log_fn("네이버 스마트스토어 감지 → 직접 파싱 모드")
-        img_urls = _smartstore_fetch_images(url, log_fn)
+        log_fn("직접 파싱 시도 중...")
+        img_urls, raw_html = _smartstore_fetch_images(url, log_fn)
         if img_urls:
             if filter_text:
                 img_urls = await _vision_filter_urls(img_urls, filter_text, api_key, base_url, log_fn)
+            title = _extract_title_from_html(raw_html, url)
+            actual_dir = _make_subdir(save_dir, platform_name, title)
+            log_fn(f"저장 폴더: {actual_dir.name}")
             log_fn(f"이미지 {len(img_urls)}개 저장")
-            save_dir.mkdir(parents=True, exist_ok=True)
             ok = 0
             for i, img_url in enumerate(img_urls, 1):
                 if stop_event.is_set(): break
                 ext = img_url.split('.')[-1].split('?')[0].lower()
                 if ext not in ('jpg', 'jpeg', 'png', 'webp', 'gif'): ext = 'jpg'
-                sp = save_dir / f"{i:03d}.{ext}"
+                sp = actual_dir / f"{i:03d}.{ext}"
                 if download_file(img_url, sp, base_url):
                     log_fn(f"  [{i:03d}] OK ({sp.stat().st_size // 1024}KB)")
                     ok += 1
                 progress_fn(i, len(img_urls))
                 time.sleep(0.1)
-            log_fn(f"\n완료! {ok}/{len(img_urls)}개 저장")
+            log_fn(f"\n완료! {ok}/{len(img_urls)}개 저장 → {actual_dir}")
             return
-        log_fn("  직접 파싱 실패 → 브라우저 모드로 전환")
+        log_fn("  직접 파싱 실패 → 브라우저 모드 전환 (사전 방문 포함)")
 
     async with async_playwright() as p:
         ctx = await _launch_browser(p, log_fn)
         page = await _new_stealth_page(ctx)
+
+        # ── 사전 방문 (쿠키/세션 획득) ───────────────
+        if prewarm_url:
+            await _prewarm_browser(page, prewarm_url, log_fn)
 
         log_fn(f"접속 중: {url}")
         await goto_and_wait(page, url, log_fn)
@@ -891,8 +984,11 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
                 img_urls = await _vision_filter_urls(
                     img_urls, filter_text, api_key, base_url, log_fn)
 
+            # 플랫폼_상품명 서브폴더 생성
+            title = await _get_page_title(page, url)
+            actual_dir = _make_subdir(save_dir, platform_name, title)
+            log_fn(f"저장 폴더: {actual_dir.name}")
             log_fn(f"이미지 {len(img_urls)}개 저장")
-            save_dir.mkdir(parents=True, exist_ok=True)
             ok = 0
             for i, img_url in enumerate(img_urls, 1):
                 if stop_event.is_set():
@@ -900,13 +996,13 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
                 ext = img_url.split('.')[-1].split('?')[0].lower()
                 if ext not in ('jpg', 'jpeg', 'png', 'webp', 'gif'):
                     ext = 'jpg'
-                sp = save_dir / f"{i:03d}.{ext}"
+                sp = actual_dir / f"{i:03d}.{ext}"
                 if download_file(img_url, sp, base_url):
                     log_fn(f"  [{i:03d}] OK ({sp.stat().st_size // 1024}KB)")
                     ok += 1
                 progress_fn(i, len(img_urls))
                 time.sleep(0.2)
-            log_fn(f"\n완료! {ok}/{len(img_urls)}개 저장")
+            log_fn(f"\n완료! {ok}/{len(img_urls)}개 저장 → {actual_dir}")
             await ctx.close()
             return
 
@@ -988,9 +1084,17 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
     url = clean_url(url)
     base_url = get_base_url(url)
 
+    platform_name = platforms.get_platform_name(url)
+    prewarm_url   = platforms.get_prewarm_url(url)
+    if platform_name:
+        log_fn(f"플랫폼 감지: {platform_name}")
+
     async with async_playwright() as p:
         ctx = await _launch_browser(p, log_fn)
         page = await _new_stealth_page(ctx)
+
+        if prewarm_url:
+            await _prewarm_browser(page, prewarm_url, log_fn)
 
         log_fn(f"접속 중: {url}")
         await goto_and_wait(page, url, log_fn)
@@ -1002,14 +1106,16 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
 
         if not projects:
             log_fn("포트폴리오 목록 없음 → 스크롤 캡처 모드")
-            save_dir.mkdir(parents=True, exist_ok=True)
+            title = await _get_page_title(page, url)
+            actual_dir = _make_subdir(save_dir, platform_name, title)
+            log_fn(f"저장 폴더: {actual_dir.name}")
             await _scroll_to_bottom(page)  # lazy-load 강제
 
             if filter_text:
-                await _capture_filtered(page, save_dir, filter_text, api_key,
+                await _capture_filtered(page, actual_dir, filter_text, api_key,
                                         base_url, log_fn, progress_fn, stop_event)
             else:
-                await _scroll_capture(page, save_dir, log_fn, progress_fn, stop_event)
+                await _scroll_capture(page, actual_dir, log_fn, progress_fn, stop_event)
 
             await ctx.close()
             return
