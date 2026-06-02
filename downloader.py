@@ -80,6 +80,21 @@ def extract_og_images(html: str, base_url: str) -> list:
     return urls
 
 
+def apply_filter(projects: list, filter_text: str, log_fn) -> list:
+    """filter_text가 있으면 title/summary에 포함된 항목만 반환"""
+    if not filter_text:
+        return projects
+    ft = filter_text.lower()
+    filtered = [
+        p for p in projects
+        if ft in (p.get("seed_title") or "").lower()
+        or ft in (p.get("seed_summary") or "").lower()
+        or ft in (p.get("seed_tags") or "").lower()
+    ]
+    log_fn(f"필터 '{filter_text}': {len(filtered)}/{len(projects)}개 해당")
+    return filtered
+
+
 async def click_more_buttons(page, log_fn):
     count = 0
     selectors = [
@@ -107,7 +122,31 @@ async def click_more_buttons(page, log_fn):
     return count
 
 
-async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event):
+async def click_next_page(page) -> bool:
+    """다음 페이지 버튼 클릭. 없으면 False 반환"""
+    selectors = [
+        "a:has-text('다음')", "button:has-text('다음')",
+        ".next", "[class*='next']", "a[aria-label='Next']",
+        "li.next > a", ".pagination .next",
+    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible():
+                await loc.click()
+                await page.wait_for_timeout(2000)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+# ══════════════════════════════════════════════
+#  이미지 다운로드 모드
+# ══════════════════════════════════════════════
+
+async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event,
+                       filter_text: str = ""):
     from playwright.async_api import async_playwright
 
     base_url = get_base_url(url)
@@ -154,8 +193,9 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
             await browser.close()
             return
 
-        # ── 포트폴리오 목록 구조 있음 → 상세 페이지 순회 ──
-        log_fn(f"프로젝트 {len(projects)}개 발견\n")
+        # ── 포트폴리오 목록 구조 있음 → 필터 후 상세 페이지 순회 ──
+        projects = apply_filter(projects, filter_text, log_fn)
+        log_fn(f"프로젝트 {len(projects)}개 처리 시작\n")
         save_dir.mkdir(parents=True, exist_ok=True)
         title_counter = {}
         total_ok = total_fail = 0
@@ -222,3 +262,153 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
         log_fn(f"성공: {total_ok}개  /  실패: {total_fail}개")
         log_fn(f"저장: {save_dir}")
         await browser.close()
+
+
+# ══════════════════════════════════════════════
+#  스크린샷 캡처 모드
+# ══════════════════════════════════════════════
+
+async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_event,
+                         filter_text: str = ""):
+    from playwright.async_api import async_playwright
+
+    base_url = get_base_url(url)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={"width": 1440, "height": 900})
+
+        log_fn(f"접속 중: {url}")
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await click_more_buttons(page, log_fn)
+        html = await page.content()
+
+        projects = parse_portfolio_list(html)
+
+        # ── 포트폴리오 목록 없음 → 스크롤 캡처 ──
+        if not projects:
+            log_fn("포트폴리오 목록 없음 → 스크롤 캡처 모드")
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            if filter_text:
+                # 텍스트 포함 요소만 골라서 캡처
+                await _capture_by_text(page, save_dir, filter_text, log_fn, progress_fn, stop_event)
+            else:
+                # 페이지 전체를 스크롤하면서 뷰포트 단위 캡처
+                await _scroll_capture(page, save_dir, log_fn, progress_fn, stop_event)
+
+            await browser.close()
+            return
+
+        # ── 포트폴리오 목록 있음 → 필터 후 상세 페이지 스크린샷 ──
+        projects = apply_filter(projects, filter_text, log_fn)
+        log_fn(f"캡처 대상: {len(projects)}개\n")
+        save_dir.mkdir(parents=True, exist_ok=True)
+        title_counter = {}
+
+        for idx, proj in enumerate(projects, 1):
+            if stop_event.is_set():
+                log_fn("중단됨")
+                break
+
+            title = (proj.get("seed_title") or f"project_{idx}").strip()
+            seed_id = proj.get("seed_id", "")
+            folder_name = sanitize(title)
+
+            base = folder_name
+            if base in title_counter:
+                title_counter[base] += 1
+                folder_name = f"{base}_{title_counter[base]:02d}"
+            else:
+                title_counter[base] = 1
+
+            log_fn(f"[{idx:03d}/{len(projects)}] {title}")
+
+            if seed_id:
+                detail_url = f"{base_url}/home/info/{seed_id}"
+                try:
+                    await page.goto(detail_url, wait_until="networkidle", timeout=30000)
+                    await page.wait_for_timeout(500)
+
+                    screenshot_path = save_dir / f"{idx:03d}_{folder_name}.png"
+                    await page.screenshot(path=str(screenshot_path), full_page=True)
+                    size_kb = screenshot_path.stat().st_size // 1024
+                    log_fn(f"  캡처 완료 ({size_kb}KB)")
+                except Exception as e:
+                    log_fn(f"  오류: {e}")
+            else:
+                log_fn("  seed_id 없음 — 건너뜀")
+
+            progress_fn(idx, len(projects))
+
+        log_fn(f"\n완료! {save_dir}")
+        await browser.close()
+
+
+async def _capture_by_text(page, save_dir: Path, filter_text: str, log_fn,
+                            progress_fn, stop_event):
+    """페이지에서 filter_text 포함 요소를 찾아 각각 스크린샷"""
+    log_fn(f"'{filter_text}' 포함 요소 탐색 중...")
+    locator = page.locator(f"text={filter_text}")
+    count = await locator.count()
+
+    if count == 0:
+        log_fn(f"  '{filter_text}' 텍스트를 포함한 요소를 찾지 못했습니다.")
+        return
+
+    log_fn(f"  {count}개 발견")
+    ok = 0
+    for i in range(count):
+        if stop_event.is_set():
+            break
+        try:
+            el = locator.nth(i)
+            await el.scroll_into_view_if_needed()
+            await page.wait_for_timeout(600)
+            sp = save_dir / f"{i+1:03d}_match.png"
+            await el.screenshot(path=str(sp))
+            size_kb = sp.stat().st_size // 1024
+            log_fn(f"  [{i+1:03d}] 캡처 ({size_kb}KB)")
+            ok += 1
+        except Exception as e:
+            log_fn(f"  [{i+1:03d}] 오류: {e}")
+        progress_fn(i + 1, count)
+
+    log_fn(f"\n완료! {ok}/{count}개 캡처")
+
+
+async def _scroll_capture(page, save_dir: Path, log_fn, progress_fn, stop_event):
+    """페이지를 스크롤하면서 뷰포트 단위로 캡처, 다음 페이지가 있으면 이동"""
+    page_num = 1
+    while True:
+        log_fn(f"  페이지 {page_num} 캡처 시작")
+        total_height = await page.evaluate("document.body.scrollHeight")
+        viewport_h = 900
+        y = 0
+        shot_idx = 1
+
+        while y < total_height:
+            if stop_event.is_set():
+                log_fn("중단됨")
+                return
+            await page.evaluate(f"window.scrollTo(0, {y})")
+            await page.wait_for_timeout(500)
+            sp = save_dir / f"p{page_num:02d}_{shot_idx:03d}.png"
+            await page.screenshot(
+                path=str(sp),
+                clip={"x": 0, "y": y, "width": 1440, "height": min(viewport_h, total_height - y)}
+            )
+            size_kb = sp.stat().st_size // 1024
+            log_fn(f"  p{page_num}-{shot_idx:03d} ({size_kb}KB)")
+            y += viewport_h
+            shot_idx += 1
+
+        # 다음 페이지 시도
+        moved = await click_next_page(page)
+        if not moved:
+            break
+        await page.wait_for_timeout(2000)
+        page_num += 1
+        log_fn(f"  → 다음 페이지({page_num})로 이동")
+
+    log_fn(f"\n완료! {save_dir}")

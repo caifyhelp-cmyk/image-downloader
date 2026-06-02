@@ -12,7 +12,7 @@ from tkinter import filedialog, scrolledtext, ttk
 from pathlib import Path
 
 from version import VERSION
-from downloader import run_download
+from downloader import run_download, run_screenshot
 from updater import check_and_auto_update
 
 try:
@@ -50,12 +50,11 @@ class SplashScreen(tk.Tk):
         self.geometry("380x140")
         self.resizable(False, False)
         self.configure(bg=BG)
-        # 화면 중앙
         self.update_idletasks()
         x = (self.winfo_screenwidth() - 380) // 2
         y = (self.winfo_screenheight() - 140) // 2
         self.geometry(f"380x140+{x}+{y}")
-        self.overrideredirect(True)   # 타이틀바 제거
+        self.overrideredirect(True)
 
         tk.Label(self, text="포트폴리오 이미지 다운로더",
                  bg=BG, fg=ACCENT2, font=("Malgun Gothic", 13, "bold")).pack(pady=(22, 6))
@@ -74,7 +73,6 @@ class SplashScreen(tk.Tk):
         self.after(0, lambda: self.status.config(text=msg))
 
     def close_and_launch(self):
-        """스플래시 닫고 메인 앱 열기"""
         self.after(0, self._do_launch)
 
     def _do_launch(self):
@@ -91,8 +89,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"이미지 다운로더  v{VERSION}")
-        self.geometry("760x620")
-        self.minsize(600, 500)
+        self.geometry("760x680")
+        self.minsize(600, 560)
         self.configure(bg=BG)
         self.stop_event = threading.Event()
         self._build_ui()
@@ -116,10 +114,16 @@ class App(tk.Tk):
         self._row(body, "URL", 0)
         self.url_var = tk.StringVar(
             value="https://www.charmspace.co.kr/home/sub/official_project")
-        tk.Entry(body, textvariable=self.url_var,
+        url_frame = tk.Frame(body, bg=BG)
+        url_frame.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=6)
+        self._url_entry = tk.Entry(url_frame, textvariable=self.url_var,
                  bg=ENTRY, fg=FG, insertbackground=FG,
-                 relief="flat", font=("Consolas", 10), bd=6
-                 ).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=6)
+                 relief="flat", font=("Consolas", 10), bd=6)
+        self._url_entry.pack(side="left", fill="x", expand=True)
+        tk.Button(url_frame, text=" 붙여넣기 ", bg=CARD, fg=FG2, relief="flat",
+                  font=("Malgun Gothic", 9), pady=4,
+                  command=self._paste_url, cursor="hand2"
+                  ).pack(side="left", padx=(6, 0))
 
         # 저장 경로
         self._row(body, "저장 폴더", 1)
@@ -136,14 +140,38 @@ class App(tk.Tk):
                   command=self._browse, cursor="hand2"
                   ).pack(side="left", padx=(6, 0))
 
+        # 필터 텍스트
+        self._row(body, "필터 텍스트", 2)
+        filter_frame = tk.Frame(body, bg=BG)
+        filter_frame.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=6)
+        self.filter_var = tk.StringVar()
+        filter_entry = tk.Entry(filter_frame, textvariable=self.filter_var,
+                 bg=ENTRY, fg=FG, insertbackground=FG,
+                 relief="flat", font=("Malgun Gothic", 10), bd=6)
+        filter_entry.pack(side="left", fill="x", expand=True)
+        tk.Label(filter_frame, text=" 빈칸이면 전체",
+                 bg=BG, fg=FG2, font=("Malgun Gothic", 8)).pack(side="left", padx=(8, 0))
+
+        # 모드 선택
+        mode_frame = tk.Frame(body, bg=BG)
+        mode_frame.grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 6))
+        self.screenshot_mode = tk.BooleanVar(value=False)
+        tk.Checkbutton(mode_frame,
+                       text="📸  스크린샷 캡처 모드  (이미지 다운 대신 페이지를 그대로 캡처)",
+                       variable=self.screenshot_mode,
+                       bg=BG, fg=FG2, selectcolor=CARD, activebackground=BG,
+                       activeforeground=ACCENT2,
+                       font=("Malgun Gothic", 9), cursor="hand2"
+                       ).pack(side="left")
+
         body.columnconfigure(1, weight=1)
 
         # 버튼
         btn_row = tk.Frame(body, bg=BG)
-        btn_row.grid(row=2, column=0, columnspan=2, pady=(12, 8))
+        btn_row.grid(row=4, column=0, columnspan=2, pady=(8, 8))
 
         self.btn_start = tk.Button(
-            btn_row, text="▶  다운로드 시작",
+            btn_row, text="▶  시작",
             bg=ACCENT, fg="white", relief="flat",
             font=("Malgun Gothic", 11, "bold"), padx=22, pady=9,
             command=self._start, cursor="hand2")
@@ -163,20 +191,20 @@ class App(tk.Tk):
 
         # 진행바
         self.progress = ttk.Progressbar(body, mode="determinate")
-        self.progress.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 2))
+        self.progress.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 2))
         self.status_var = tk.StringVar(value="대기 중")
         tk.Label(body, textvariable=self.status_var, bg=BG, fg=FG2,
                  font=("Malgun Gothic", 9)
-                 ).grid(row=4, column=0, columnspan=2, sticky="w")
+                 ).grid(row=6, column=0, columnspan=2, sticky="w")
 
         # 로그
         self.log_box = scrolledtext.ScrolledText(
             body, bg=ENTRY, fg=FG, insertbackground=FG,
-            font=("Consolas", 9), relief="flat", bd=0, wrap="word", height=16)
-        self.log_box.grid(row=5, column=0, columnspan=2,
+            font=("Consolas", 9), relief="flat", bd=0, wrap="word", height=14)
+        self.log_box.grid(row=7, column=0, columnspan=2,
                           sticky="nsew", pady=(10, 0))
         self.log_box.config(state="disabled")
-        body.rowconfigure(5, weight=1)
+        body.rowconfigure(7, weight=1)
 
         # 푸터
         ft = tk.Frame(self, bg=PANEL, pady=6)
@@ -186,12 +214,33 @@ class App(tk.Tk):
         tk.Label(ft, text="URL만 바꾸면 다른 사이트도 지원",
                  bg=PANEL, fg=FG2, font=("Malgun Gothic", 8)).pack(side="right", padx=16)
 
+        # IME 비활성화 (URL 입력 필드 — 한글 입력기 간섭 방지)
+        self.after(300, lambda: self._disable_ime(self._url_entry))
+
+    def _disable_ime(self, widget):
+        """Windows 한글 IME를 URL 입력란에서 비활성화"""
+        try:
+            import ctypes
+            hwnd = widget.winfo_id()
+            ctypes.windll.imm32.ImmAssociateContextEx(hwnd, None, 0)
+        except Exception:
+            pass
+
     def _row(self, parent, label, row):
         tk.Label(parent, text=label, bg=BG, fg=FG2,
-                 font=("Malgun Gothic", 10), anchor="e", width=8
+                 font=("Malgun Gothic", 10), anchor="e", width=9
                  ).grid(row=row, column=0, sticky="e", pady=6)
 
     # ── 이벤트 ────────────────────────────────
+    def _paste_url(self):
+        """클립보드에서 URL 붙여넣기"""
+        try:
+            text = self.clipboard_get().strip()
+            if text:
+                self.url_var.set(text)
+        except Exception:
+            pass
+
     def _browse(self):
         d = filedialog.askdirectory()
         if d:
@@ -228,6 +277,9 @@ class App(tk.Tk):
             self.log("올바른 URL을 입력하세요.")
             return
         save_dir = Path(self.dir_var.get())
+        filter_text = self.filter_var.get().strip()
+        is_screenshot = self.screenshot_mode.get()
+
         self.stop_event.clear()
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
@@ -235,13 +287,24 @@ class App(tk.Tk):
         self.log_box.config(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.config(state="disabled")
-        self.log(f"시작: {url}")
+
+        mode_label = "스크린샷 캡처" if is_screenshot else "이미지 다운로드"
+        self.log(f"모드: {mode_label}")
+        self.log(f"URL: {url}")
+        if filter_text:
+            self.log(f"필터: '{filter_text}'")
         self.log(f"저장: {save_dir}\n")
 
         def worker():
             try:
-                asyncio.run(run_download(
-                    url, save_dir, self.log, self.set_progress, self.stop_event))
+                if is_screenshot:
+                    asyncio.run(run_screenshot(
+                        url, save_dir, self.log, self.set_progress,
+                        self.stop_event, filter_text))
+                else:
+                    asyncio.run(run_download(
+                        url, save_dir, self.log, self.set_progress,
+                        self.stop_event, filter_text))
             except Exception as e:
                 self.log(f"\n오류: {e}")
             finally:
@@ -277,15 +340,9 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    # 1. 스플래시 띄우기
     splash = SplashScreen()
-
-    # 2. 백그라운드에서 업데이트 확인
-    #    - 업데이트 있음 → 자동 다운로드 → 자동 재시작 (앱 안 열림)
-    #    - 업데이트 없음 → 스플래시 닫고 메인 앱 열기
     check_and_auto_update(
         log_fn=splash.set_status,
         on_complete=splash.close_and_launch
     )
-
     splash.mainloop()
