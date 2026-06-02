@@ -7,6 +7,7 @@ import json
 import re
 import time
 import requests
+import urllib.parse
 from pathlib import Path
 
 from vision_matcher import fetch_and_check, check_image_matches
@@ -115,9 +116,43 @@ def decode_unicode(obj):
 
 
 def get_base_url(url: str) -> str:
-    from urllib.parse import urlparse
-    p = urlparse(url)
+    p = urllib.parse.urlparse(url)
     return f"{p.scheme}://{p.netloc}"
+
+
+def normalize_img_url(url: str) -> str:
+    """
+    CDN 크기/크롭 파라미터 제거 → 원본 해상도 URL 반환
+    - 네이버: ?type=w966 / type=f640xf640 / type=s960 등
+    - Next.js: /_next/image?url=<인코딩URL>&w=... → 내부 URL 추출
+    - 쿠팡/카카오 등 공통 w=, h= 리사이즈 파라미터
+    """
+    if not url or url.startswith('data:'):
+        return url
+
+    # Next.js image proxy → 실제 원본 URL 추출
+    m = re.search(r'/_next/image\?url=([^&]+)', url)
+    if m:
+        return urllib.parse.unquote(m.group(1))
+
+    parsed = urllib.parse.urlparse(url)
+    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+
+    # 제거할 파라미터 목록 (크기/품질 제한용)
+    _REMOVE = {
+        'type',     # 네이버 CDN: type=w966, type=f640xf640
+        'w', 'h',   # 일반 리사이즈
+        'width', 'height',
+        'size', 'resize',
+        'quality', 'q',
+        'fit', 'crop', 'auto',
+        'format',
+        'imwidth', 'imheight',  # 쿠팡
+    }
+    cleaned = {k: v for k, v in qs.items() if k.lower() not in _REMOVE}
+    new_query = urllib.parse.urlencode(cleaned, doseq=True)
+    normalized = urllib.parse.urlunparse(parsed._replace(query=new_query))
+    return normalized
 
 
 def download_file(url: str, save_path: Path, base_url: str, min_bytes: int = 5000) -> bool:
@@ -276,22 +311,30 @@ async def extract_all_images(page, log_fn) -> list:
             return candidates[0].url;
         }
 
+        // ── 0. meta og:image (대표 이미지) ────────────
+        const og = document.querySelector('meta[property="og:image"], meta[name="og:image"]');
+        if (og && og.content) add(og.content);
+
         // ── 1. img 태그 ──────────────────────────────
         // 고해상도 속성 우선, 그 다음 일반 속성
         const HI_RES = [
             'data-zoom-image','data-large','data-full','data-hi-res-src',
-            'data-original','data-big','data-original-src','data-max-src'
+            'data-origin','data-origin-src','data-original','data-big',
+            'data-original-src','data-max-src','data-master-src',
+            'data-1200','data-800','data-raw-src'
         ];
         const STD = [
-            'data-src','data-lazy-src','data-url','data-img','data-image',
-            'data-lazy','data-delayed-url','data-actualsrc','data-echo',
-            'data-bg','data-background','src'
+            'data-src','data-lazy-src','data-lazy','data-url',
+            'data-img','data-image','data-delayed-url','data-actualsrc',
+            'data-echo','data-bg','data-background','data-wp-src',
+            'data-cfsrc',  // Cloudflare
+            'src'
         ];
 
         document.querySelectorAll('img').forEach(img => {
             // srcset 먼저 (가장 큰 버전)
             let srcsetUrl = null;
-            for (const a of ['srcset','data-srcset']) {
+            for (const a of ['srcset','data-srcset','data-lazy-srcset']) {
                 srcsetUrl = bestFromSrcset(img.getAttribute(a));
                 if (srcsetUrl) break;
             }
@@ -314,11 +357,28 @@ async def extract_all_images(page, log_fn) -> list:
 
         // ── 2. picture > source (가장 큰 srcset) ────
         document.querySelectorAll('picture source').forEach(el => {
-            const url = bestFromSrcset(el.getAttribute('srcset') || el.getAttribute('data-srcset'));
+            const url = bestFromSrcset(
+                el.getAttribute('srcset') || el.getAttribute('data-srcset')
+            );
             if (url) add(url);
         });
 
-        // ── 3. 인라인 CSS background-image ───────────
+        // ── 3. noscript 안 img src (일부 lazy-loader 원본 보관) ──
+        document.querySelectorAll('noscript').forEach(ns => {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = ns.textContent;
+            tmp.querySelectorAll('img').forEach(img => {
+                const v = img.getAttribute('src');
+                if (v) add(v);
+            });
+        });
+
+        // ── 4. video poster (썸네일 이미지) ─────────
+        document.querySelectorAll('video[poster]').forEach(v => {
+            add(v.getAttribute('poster'));
+        });
+
+        // ── 5. 인라인 CSS background-image ───────────
         document.querySelectorAll('[style]').forEach(el => {
             const bg = el.style.backgroundImage;
             if (!bg || bg === 'none') return;
@@ -326,12 +386,12 @@ async def extract_all_images(page, log_fn) -> list:
             matches.forEach(m => add(m.replace(/url\(["']?|["']?\)$/g, '')));
         });
 
-        // ── 4. 주요 컨테이너 computed background ─────
+        // ── 6. 주요 컨테이너 computed background ─────
         const BG_SEL = [
             '[class*="banner"],[class*="hero"],[class*="slide"],[class*="thumb"]',
             '[class*="visual"],[class*="cover"],[class*="gallery"],[class*="product"]',
             '[class*="card"],[class*="item"],[class*="image"],[class*="photo"]',
-            'section,article,figure'
+            'section,article,figure,[class*="swiper"],[class*="carousel"]'
         ].join(',');
         document.querySelectorAll(BG_SEL).forEach(el => {
             try {
@@ -343,10 +403,25 @@ async def extract_all_images(page, log_fn) -> list:
             } catch(e) {}
         });
 
-        // ── 5. a 태그가 이미지로 직접 링크 ──────────
+        // ── 7. a 태그가 이미지로 직접 링크 ──────────
         document.querySelectorAll('a[href]').forEach(a => {
             const h = a.getAttribute('href') || '';
             if (/\.(jpe?g|png|webp|gif|bmp|tiff|avif)(\?|$)/i.test(h)) add(h);
+        });
+
+        // ── 8. JSON-LD / 스크립트 내 이미지 URL 추출 ─
+        document.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
+            try {
+                const data = JSON.parse(s.textContent);
+                const flatten = (obj) => {
+                    if (!obj || typeof obj !== 'object') return;
+                    for (const v of Object.values(obj)) {
+                        if (typeof v === 'string' && /^https?:.*\.(jpe?g|png|webp|gif)/i.test(v)) add(v);
+                        else flatten(v);
+                    }
+                };
+                flatten(data);
+            } catch(e) {}
         });
 
         return out;
@@ -357,9 +432,10 @@ async def extract_all_images(page, log_fn) -> list:
         try:
             srcs = await frame.evaluate(JS)
             for s in srcs:
-                if s not in seen:
-                    seen.add(s)
-                    urls.append(s)
+                norm = normalize_img_url(s)
+                if norm and norm not in seen:
+                    seen.add(norm)
+                    urls.append(norm)
         except Exception:
             pass
 
@@ -377,37 +453,56 @@ async def extract_all_images(page, log_fn) -> list:
 
 async def goto_and_wait(page, url: str, log_fn):
     """
-    페이지 이동 후 SPA(React/Vue 등) 렌더링까지 기다림.
-    1) domcontentloaded 즉시 완료
-    2) networkidle 최대 20초 추가 대기 (SPA 렌더링)
-    3) img 태그 등장 최대 10초 대기
+    페이지 이동 후 콘텐츠 렌더링까지 확실하게 기다림.
+    1) domcontentloaded 완료
+    2) networkidle 최대 15초 (SPA 렌더링용, 실패해도 계속)
+    3) 실제 src가 있는 img 3개 이상 등장할 때까지 최대 15초 대기
+    4) 그래도 없으면 3초 추가 대기 후 계속
     """
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-    # SPA 렌더링 대기 (타임아웃 무시)
+    # SPA 렌더링 대기 (타임아웃 무시 — 네이버/쿠팡은 계속 요청해서 networkidle 미달성)
     try:
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         pass
 
-    # img 태그가 실제로 DOM에 나타날 때까지 대기
+    # 실제 이미지가 DOM에 들어왔는지 확인 (src 속성이 있는 img 3개 이상)
     try:
-        await page.wait_for_selector("img", timeout=10000)
+        await page.wait_for_function(
+            "() => document.querySelectorAll('img[src]:not([src=\"\"])').length >= 3",
+            timeout=15000,
+        )
     except Exception:
-        pass
+        # img가 없거나 적은 페이지(텍스트 위주)도 있으므로 무시
+        try:
+            await page.wait_for_selector("img", timeout=5000)
+        except Exception:
+            await page.wait_for_timeout(3000)
 
 
 async def _scroll_to_bottom(page):
-    """페이지 끝까지 스크롤해서 lazy-load 이미지 강제 로딩"""
+    """
+    IntersectionObserver 기반 lazy-load를 확실히 트리거하는 천천히 스크롤.
+    - 200px 단위로 이동 → 브라우저가 각 구간에서 IO 이벤트 발생
+    - 페이지 높이가 늘어나면 재측정하며 계속 스크롤
+    """
     try:
-        prev_height = 0
-        for _ in range(10):
+        y = 0
+        step = 200           # IntersectionObserver 감지용 세밀한 단위
+        wait_ms = 80         # 각 스텝 간 대기 (너무 짧으면 IO 미발생)
+        max_height = 30000   # 무한스크롤 사이트 방어
+
+        while y < max_height:
             height = await page.evaluate("document.body.scrollHeight")
-            if height == prev_height:
+            if y >= height:
                 break
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(800)
-            prev_height = height
+            await page.evaluate(f"window.scrollTo(0, {y})")
+            await page.wait_for_timeout(wait_ms)
+            y += step
+
+        # 스크롤 후 lazy-load 완료 대기
+        await page.wait_for_timeout(1200)
         await page.evaluate("window.scrollTo(0, 0)")
     except Exception:
         pass
