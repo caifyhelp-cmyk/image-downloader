@@ -602,12 +602,14 @@ async def _scroll_to_bottom(page):
 
 async def expand_detail_content(page, log_fn):
     """
-    한국 쇼핑몰 공통 패턴: '상품 상세' 탭 클릭 → 랜딩 이미지 로드
-    스마트스토어 / 쿠팡 / 11번가 / 지마켓 등 대부분의 쇼핑몰에 탭이 존재
+    한국 쇼핑몰 공통 패턴:
+    1) 상품 상세 탭 클릭
+    2) 펼쳐 보기 / 더보기 버튼 반복 클릭 (다단계 펼침 대응)
+    3) 스크롤하면서 숨겨진 더보기 버튼 추가 클릭
     """
-    # 1. 상품 상세 탭 클릭
+    # ── 1. 상품 상세 탭 클릭 ─────────────────────
     detail_tab_texts = [
-        "상품정보",           # 네이버 스마트스토어 실제 탭명
+        "상품정보",           # 네이버 스마트스토어
         "상품 상세",
         "상세 정보",
         "상품 설명",
@@ -615,35 +617,62 @@ async def expand_detail_content(page, log_fn):
         "상세보기",
         "제품 상세",
         "상품상세",
-        "Product Detail",
         "상품정보보기",
+        "Product Detail",
+        "상세",
     ]
     for text in detail_tab_texts:
         try:
             loc = page.locator(f"text={text}").first
-            if await loc.is_visible(timeout=800):
+            if await loc.is_visible(timeout=600):
                 await loc.click()
-                await page.wait_for_timeout(3000)   # iframe 로드 대기
+                await page.wait_for_timeout(2500)
                 log_fn(f"  탭 클릭: {text}")
                 break
         except Exception:
             pass
 
-    # 2. 상세 더보기/펼치기 버튼 클릭
-    expand_texts = [
-        "상세설명 더보기", "상품 상세 더 보기", "상품상세 더보기",
-        "펼치기", "전체보기", "내용 펼치기",
+    # ── 2. 펼쳐 보기 / 더보기 버튼 반복 클릭 ────
+    # 한 번이 아니라 버튼이 없어질 때까지 반복 (여러 단계 펼침 대응)
+    expand_selectors = [
+        # 텍스트 기반
+        "text=펼쳐 보기",
+        "text=펼쳐보기",
+        "text=펼치기",
+        "text=상세설명 더보기",
+        "text=상품상세 더보기",
+        "text=상품 상세 더 보기",
+        "text=전체보기",
+        "text=내용 펼치기",
+        "text=더보기",
+        "text=상세 더보기",
+        "text=내용 더보기",
+        # 클래스/속성 기반 (쇼핑몰마다 다름)
+        "[class*='more_view']",
+        "[class*='btn_more']",
+        "[class*='detail_more']",
+        "[class*='expand']",
+        "button[class*='more']",
+        "a[class*='more']",
     ]
-    for text in expand_texts:
-        try:
-            loc = page.locator(f"text={text}").first
-            if await loc.is_visible(timeout=500):
-                await loc.click()
-                await page.wait_for_timeout(1500)
-                log_fn(f"  펼치기 클릭: {text}")
-                break
-        except Exception:
-            pass
+
+    max_rounds = 5
+    for _ in range(max_rounds):
+        clicked = False
+        for sel in expand_selectors:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=400):
+                    await loc.scroll_into_view_if_needed()
+                    await loc.click()
+                    await page.wait_for_timeout(1500)
+                    log_fn(f"  펼치기: {sel}")
+                    clicked = True
+                    break
+            except Exception:
+                pass
+        if not clicked:
+            break  # 더 이상 버튼 없음
 
 
 async def click_more_buttons(page, log_fn):
