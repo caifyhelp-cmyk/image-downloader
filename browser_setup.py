@@ -1,6 +1,5 @@
 """
 Playwright 브라우저 설치 관리
-PyInstaller --onefile 환경에서 브라우저를 고정 경로에 설치/확인
 """
 
 import os
@@ -10,36 +9,40 @@ import subprocess
 import threading
 from pathlib import Path
 
-# ─────────────────────────────────────────────
-# 핵심: 브라우저를 임시폴더(_MEI...) 대신
-#        %LOCALAPPDATA%\ms-playwright 에 고정
-# ─────────────────────────────────────────────
-BROWSERS_PATH = str(Path.home() / "AppData" / "Local" / "ms-playwright")
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSERS_PATH
+MS_PW = Path.home() / "AppData" / "Local" / "ms-playwright"
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(MS_PW)
+
+# 시스템 Chrome 경로들
+_CHROME_PATHS = [
+    Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "Google/Chrome/Application/chrome.exe",
+    Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
+    Path.home() / "AppData/Local/Google/Chrome/Application/chrome.exe",
+]
 
 
-def _chromium_exists() -> bool:
-    """ms-playwright 에 chromium(headless-shell 포함)이 있는지 확인"""
-    base = Path(BROWSERS_PATH)
+def _system_chrome_exists() -> bool:
+    return any(p.exists() for p in _CHROME_PATHS)
+
+
+def _ms_playwright_chromium_exists() -> bool:
     patterns = [
-        str(base / "chromium*" / "chrome-win" / "chrome.exe"),
-        str(base / "chromium_headless_shell*" / "**" / "chrome-headless-shell.exe"),
-        str(base / "chromium_headless_shell*" / "**" / "chrome.exe"),
+        str(MS_PW / "chromium_headless_shell-*" / "**" / "chrome-headless-shell.exe"),
+        str(MS_PW / "chromium-*" / "chrome-win" / "chrome.exe"),
     ]
     return any(glob.glob(p, recursive=True) for p in patterns)
 
 
-def _run_playwright_install(log_fn):
-    """playwright install chromium 실행 (frozen/개발 모두 지원)"""
-    env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": BROWSERS_PATH}
+def _chromium_exists() -> bool:
+    return _system_chrome_exists() or _ms_playwright_chromium_exists()
 
+
+def _run_playwright_install(log_fn) -> bool:
+    env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(MS_PW)}
     try:
-        # playwright 내부 드라이버 실행파일 사용 (frozen exe에서도 작동)
         from playwright._impl._driver import compute_driver_executable
         driver_exe, driver_cli = compute_driver_executable()
         cmd = [str(driver_exe), str(driver_cli), "install", "chromium"]
     except Exception:
-        # fallback: python -m playwright
         cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
 
     log_fn("Chromium 브라우저 설치 중... (최초 1회, 약 1~2분 소요)")
@@ -61,10 +64,6 @@ def _run_playwright_install(log_fn):
 
 
 def ensure_browser(log_fn, on_ready, on_fail):
-    """
-    브라우저 있으면 즉시 on_ready().
-    없으면 백그라운드 설치 후 on_ready() 또는 on_fail().
-    """
     if _chromium_exists():
         on_ready()
         return

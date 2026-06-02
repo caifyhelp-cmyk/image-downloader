@@ -2,8 +2,6 @@
 다운로드 핵심 로직
 """
 
-import browser_setup  # noqa: F401 — PLAYWRIGHT_BROWSERS_PATH 환경변수 세팅
-
 import asyncio
 import json
 import re
@@ -12,6 +10,50 @@ import requests
 from pathlib import Path
 
 from vision_matcher import fetch_and_check, check_image_matches
+
+# ══════════════════════════════════════════════
+#  브라우저 실행 (여러 방법 순서대로 시도)
+# ══════════════════════════════════════════════
+
+def _find_chromium_exe() -> str:
+    """ms-playwright 폴더에서 chromium 실행파일 탐색"""
+    import glob
+    from pathlib import Path as _Path
+    base = _Path.home() / "AppData" / "Local" / "ms-playwright"
+    patterns = [
+        str(base / "chromium_headless_shell-*" / "chrome-headless-shell-win64" / "chrome-headless-shell.exe"),
+        str(base / "chromium-*" / "chrome-win" / "chrome.exe"),
+    ]
+    for pat in patterns:
+        found = glob.glob(pat)
+        if found:
+            return found[0]
+    return ""
+
+
+async def _launch_browser(p):
+    """
+    브라우저 실행 우선순위:
+    1. 시스템에 설치된 Google Chrome (별도 다운로드 불필요)
+    2. ms-playwright 경로에 직접 설치된 chromium
+    3. playwright 기본 경로 (개발 환경)
+    """
+    # 1. 시스템 Chrome
+    try:
+        return await p.chromium.launch(headless=True, channel="chrome")
+    except Exception:
+        pass
+
+    # 2. ms-playwright 직접 경로
+    exe = _find_chromium_exe()
+    if exe:
+        try:
+            return await p.chromium.launch(headless=True, executable_path=exe)
+        except Exception:
+            pass
+
+    # 3. 기본 (개발 환경 fallback)
+    return await p.chromium.launch(headless=True)
 
 BASE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -201,7 +243,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
     base_url = get_base_url(url)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await _launch_browser(p)
         page = await browser.new_page()
 
         log_fn(f"접속 중: {url}")
@@ -324,7 +366,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
     base_url = get_base_url(url)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await _launch_browser(p)
         page = await browser.new_page(viewport={"width": 1440, "height": 900})
 
         log_fn(f"접속 중: {url}")
