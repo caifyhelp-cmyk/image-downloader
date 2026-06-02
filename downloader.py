@@ -190,6 +190,75 @@ def apply_filter(projects: list, filter_text: str, api_key: str,
     return result
 
 
+async def extract_all_images(page, log_fn) -> list:
+    """
+    현재 페이지 + 모든 iframe 안에서 이미지 URL 추출.
+    스크롤로 lazy-load 이미지도 강제 로딩.
+    """
+    # 스크롤해서 lazy-load 이미지 강제 로딩
+    await _scroll_to_bottom(page)
+
+    seen = set()
+    urls = []
+
+    async def _collect(frame):
+        try:
+            srcs = await frame.evaluate("""
+                () => {
+                    const attrs = ['src','data-src','data-lazy-src','data-original',
+                                   'data-url','data-img','data-image','data-lazy'];
+                    const imgs = Array.from(document.querySelectorAll('img'));
+                    const results = [];
+                    imgs.forEach(img => {
+                        for (const attr of attrs) {
+                            const v = img.getAttribute(attr);
+                            if (v && !v.startsWith('data:') && v.startsWith('http')) {
+                                results.push(v);
+                                break;
+                            }
+                        }
+                    });
+                    return results;
+                }
+            """)
+            for s in srcs:
+                s = s.split('?')[0]  # 쿼리스트링 제거
+                if s not in seen:
+                    seen.add(s)
+                    urls.append(s)
+        except Exception:
+            pass
+
+    # 메인 프레임
+    await _collect(page.main_frame)
+
+    # 모든 iframe 탐색
+    frames = page.frames
+    if len(frames) > 1:
+        log_fn(f"  iframe {len(frames)-1}개 탐색 중...")
+    for frame in frames[1:]:
+        await _collect(frame)
+
+    log_fn(f"  이미지 {len(urls)}개 발견 (iframe 포함)")
+    return list(dict.fromkeys(urls))
+
+
+async def _scroll_to_bottom(page):
+    """페이지 끝까지 스크롤해서 lazy-load 이미지 강제 로딩"""
+    try:
+        prev_height = 0
+        for _ in range(10):
+            height = await page.evaluate("document.body.scrollHeight")
+            if height == prev_height:
+                break
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(800)
+            prev_height = height
+        await page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+
+
 async def click_more_buttons(page, log_fn):
     count = 0
     selectors = [
@@ -260,12 +329,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
             log_fn("포트폴리오 목록 없음 → 페이지 이미지 전체 다운로드")
             img_urls = extract_og_images(html, base_url)
             if not img_urls:
-                img_tags = await page.evaluate("""
-                    () => Array.from(document.querySelectorAll('img'))
-                         .map(i => i.src || i.dataset.src || '')
-                         .filter(s => s && !s.includes('data:'))
-                """)
-                img_urls = list(dict.fromkeys(img_tags))
+                img_urls = await extract_all_images(page, log_fn)
 
             # 필터 적용 (Vision 포함)
             if filter_text and img_urls:
@@ -382,6 +446,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
         if not projects:
             log_fn("포트폴리오 목록 없음 → 스크롤 캡처 모드")
             save_dir.mkdir(parents=True, exist_ok=True)
+            await _scroll_to_bottom(page)  # lazy-load 강제
 
             if filter_text:
                 await _capture_filtered(page, save_dir, filter_text, api_key,
