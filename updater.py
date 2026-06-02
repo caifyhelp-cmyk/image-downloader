@@ -72,9 +72,10 @@ def download_and_apply(dl_url: str, log_fn, fail_fn):
 
             if getattr(sys, "frozen", False):
                 current_exe = Path(sys.executable)
-                batch = _make_swap_batch(current_exe, Path(tmp.name))
+                ps1 = _make_swap_script(current_exe, Path(tmp.name))
                 subprocess.Popen(
-                    ["cmd", "/c", _short(batch)],
+                    ["powershell", "-ExecutionPolicy", "Bypass",
+                     "-WindowStyle", "Hidden", "-File", str(ps1)],
                     creationflags=0x00000008 | 0x08000000
                 )
                 os._exit(0)
@@ -86,14 +87,13 @@ def download_and_apply(dl_url: str, log_fn, fail_fn):
 
 
 # ──────────────────────────────────────────────
-#  한글 경로 → 8.3 단축경로 (cmd.exe ASCII 호환)
+#  한글 경로 → 8.3 단축경로 (하위 호환용)
 # ──────────────────────────────────────────────
 
 def _short(path) -> str:
     """
     Windows GetShortPathNameW로 8.3 단축경로 반환.
-    한글·공백 등 특수문자가 있어도 cmd.exe에서 안전하게 사용 가능.
-    실패 시 원본 경로 반환.
+    실패 시 원본 경로 반환 (PowerShell 경로로 사용).
     """
     try:
         import ctypes
@@ -163,13 +163,10 @@ def _download_and_restart(dl_url: str, new_ver: str, log_fn, on_complete):
         if getattr(sys, "frozen", False):
             current_exe = Path(sys.executable)
             new_exe     = Path(tmp.name)
-            batch       = _make_swap_batch(current_exe, new_exe)
-            batch_short = _short(batch)
-
-            # DETACHED_PROCESS(0x8) | CREATE_NO_WINDOW(0x8000000)
-            # → 부모 종료 후에도 cmd가 독립적으로 실행됨
+            ps1 = _make_swap_script(current_exe, new_exe)
             subprocess.Popen(
-                ["cmd", "/c", batch_short],
+                ["powershell", "-ExecutionPolicy", "Bypass",
+                 "-WindowStyle", "Hidden", "-File", str(ps1)],
                 creationflags=0x00000008 | 0x08000000
             )
             log_fn("업데이트 적용 중... (자동 재시작)")
@@ -184,33 +181,39 @@ def _download_and_restart(dl_url: str, new_ver: str, log_fn, on_complete):
         on_complete()
 
 
-def _make_swap_batch(current_exe: Path, new_exe: Path) -> Path:
+def _make_swap_script(current_exe: Path, new_exe: Path) -> Path:
     """
-    한글 경로를 8.3 단축경로로 변환 후 배치 작성.
-    cmd.exe가 한글을 깨뜨리는 문제 완전 차단.
+    PowerShell 스크립트로 exe 교체.
+    - PowerShell은 유니코드 경로 완벽 지원 → 한글 경로 문제 없음
+    - BOM(utf-8-sig) 으로 저장해야 PowerShell이 한글을 올바르게 읽음
     """
-    # 모든 경로를 ASCII 8.3 단축경로로 변환
-    cur = _short(current_exe)
-    nw  = _short(new_exe)
+    ps1 = Path(tempfile.gettempdir()) / "imgdl_upd.ps1"
 
-    bat = Path(tempfile.gettempdir()) / "imgdl_upd.bat"
-    bat_short_parent = _short(bat.parent)
-    bat_ascii = bat_short_parent + "\\imgdl_upd.bat"
+    # PowerShell 문자열에서 작은따옴표 이스케이프
+    src = str(new_exe).replace("'", "''")
+    dst = str(current_exe).replace("'", "''")
 
     content = (
-        "@echo off\r\n"
-        "timeout /t 3 /nobreak >nul\r\n"
-        # 1차 시도
-        f"move /y \"{nw}\" \"{cur}\"\r\n"
-        # 실패 시 2초 더 기다렸다가 재시도
-        "if errorlevel 1 (\r\n"
-        "  timeout /t 2 /nobreak >nul\r\n"
-        f"  move /y \"{nw}\" \"{cur}\"\r\n"
-        ")\r\n"
-        f"start \"\" \"{cur}\"\r\n"
-        "del \"%~f0\"\r\n"
+        "Start-Sleep -Seconds 3\n"
+        f"$src = '{src}'\n"
+        f"$dst = '{dst}'\n"
+        "for ($i = 0; $i -lt 3; $i++) {\n"
+        "    try {\n"
+        "        Move-Item -Force -Path $src -Destination $dst -ErrorAction Stop\n"
+        "        break\n"
+        "    } catch {\n"
+        "        Start-Sleep -Seconds 2\n"
+        "    }\n"
+        "}\n"
+        "Start-Process -FilePath $dst\n"
+        "Remove-Item -Force -Path $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue\n"
     )
 
-    # ASCII 경로만 포함되므로 ascii 인코딩으로 안전하게 저장
-    Path(bat_ascii).write_text(content, encoding="ascii")
-    return Path(bat_ascii)
+    # BOM 포함 UTF-8 — PowerShell 기본 인코딩이 이걸 요구
+    ps1.write_text(content, encoding="utf-8-sig")
+    return ps1
+
+
+def _make_swap_batch(current_exe: Path, new_exe: Path) -> Path:
+    """하위 호환용 — 내부적으로 PowerShell 스크립트 생성"""
+    return _make_swap_script(current_exe, new_exe)
