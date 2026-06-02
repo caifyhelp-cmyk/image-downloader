@@ -5,6 +5,9 @@ on:
     tags:
       - "v*.*.*"   # v1.0.1, v2.0.0 등 태그 push 시 자동 실행
 
+permissions:
+  contents: write   # 릴리즈 생성 및 파일 업로드 권한
+
 jobs:
   build:
     runs-on: windows-latest
@@ -26,7 +29,7 @@ jobs:
       - name: PyInstaller로 exe 빌드
         run: |
           pyinstaller --onefile --windowed `
-            --name "이미지다운로더" `
+            --name "ImageDownloader" `
             --hidden-import=playwright `
             --hidden-import=playwright.async_api `
             --hidden-import=packaging `
@@ -51,7 +54,7 @@ jobs:
             2. URL 입력 (포트폴리오 사이트)
             3. 저장 폴더 선택
             4. ▶ 다운로드 시작
-          files: dist/이미지다운로더.exe
+          files: dist/ImageDownloader.exe
           draft: false
           prerelease: false
         env:
