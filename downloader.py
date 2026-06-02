@@ -475,8 +475,21 @@ async def extract_all_images(page, log_fn) -> list:
     }
     """
 
-    async def _collect(frame):
+    async def _collect(frame, scroll=False):
         try:
+            # iframe 내부도 스크롤 (lazy-load 트리거)
+            if scroll:
+                try:
+                    h = await frame.evaluate("document.body.scrollHeight")
+                    if h > 300:
+                        y = 0
+                        while y < min(h, 30000):
+                            await frame.evaluate(f"window.scrollTo(0, {y})")
+                            await asyncio.sleep(0.07)
+                            y += 250
+                        await asyncio.sleep(1.0)
+                except Exception:
+                    pass
             srcs = await frame.evaluate(JS)
             for s in srcs:
                 norm = normalize_img_url(s)
@@ -486,13 +499,13 @@ async def extract_all_images(page, log_fn) -> list:
         except Exception:
             pass
 
-    await _collect(page.main_frame)
+    await _collect(page.main_frame, scroll=False)  # 메인 프레임은 이미 스크롤됨
 
     frames = page.frames
     if len(frames) > 1:
         log_fn(f"  iframe {len(frames) - 1}개 탐색 중...")
         for frame in frames[1:]:
-            await _collect(frame)
+            await _collect(frame, scroll=True)  # iframe은 내부 스크롤 포함
 
     log_fn(f"  이미지 {len(urls)}개 발견")
     return urls
@@ -553,6 +566,44 @@ async def _scroll_to_bottom(page):
         await page.evaluate("window.scrollTo(0, 0)")
     except Exception:
         pass
+
+
+async def expand_detail_content(page, log_fn):
+    """
+    한국 쇼핑몰 공통 패턴: '상품 상세' 탭 클릭 → 랜딩 이미지 로드
+    스마트스토어 / 쿠팡 / 11번가 / 지마켓 등 대부분의 쇼핑몰에 탭이 존재
+    """
+    # 1. 상품 상세 탭 클릭
+    detail_tab_texts = [
+        "상품 상세", "상세 정보", "상품정보", "상품 설명",
+        "상세설명", "상세보기", "제품 상세", "Product Detail",
+    ]
+    for text in detail_tab_texts:
+        try:
+            loc = page.locator(f"text={text}").first
+            if await loc.is_visible(timeout=800):
+                await loc.click()
+                await page.wait_for_timeout(2000)
+                log_fn(f"  탭 클릭: {text}")
+                break
+        except Exception:
+            pass
+
+    # 2. 상세 더보기/펼치기 버튼 클릭
+    expand_texts = [
+        "상세설명 더보기", "상품 상세 더 보기", "상품상세 더보기",
+        "펼치기", "전체보기", "내용 펼치기",
+    ]
+    for text in expand_texts:
+        try:
+            loc = page.locator(f"text={text}").first
+            if await loc.is_visible(timeout=500):
+                await loc.click()
+                await page.wait_for_timeout(1500)
+                log_fn(f"  펼치기 클릭: {text}")
+                break
+        except Exception:
+            pass
 
 
 async def click_more_buttons(page, log_fn):
@@ -616,6 +667,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
 
         log_fn(f"접속 중: {url}")
         await goto_and_wait(page, url, log_fn)
+        await expand_detail_content(page, log_fn)   # 상품 상세 탭 클릭
         await click_more_buttons(page, log_fn)
         html = await page.content()
 
@@ -739,6 +791,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
 
         log_fn(f"접속 중: {url}")
         await goto_and_wait(page, url, log_fn)
+        await expand_detail_content(page, log_fn)
         await click_more_buttons(page, log_fn)
         html = await page.content()
 
