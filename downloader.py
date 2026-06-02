@@ -84,10 +84,14 @@ def get_base_url(url: str) -> str:
     return f"{p.scheme}://{p.netloc}"
 
 
-def download_file(url: str, save_path: Path, base_url: str) -> bool:
+def download_file(url: str, save_path: Path, base_url: str, min_bytes: int = 5000) -> bool:
+    """
+    min_bytes 이상인 이미지만 저장 (아이콘·추적픽셀 제외).
+    기본 5KB 이상.
+    """
     try:
         res = requests.get(url, headers={**BASE_HEADERS, "Referer": base_url}, timeout=30)
-        if res.status_code == 200 and len(res.content) > 500:
+        if res.status_code == 200 and len(res.content) >= min_bytes:
             save_path.write_bytes(res.content)
             return True
         return False
@@ -192,55 +196,114 @@ def apply_filter(projects: list, filter_text: str, api_key: str,
 
 async def extract_all_images(page, log_fn) -> list:
     """
-    현재 페이지 + 모든 iframe 안에서 이미지 URL 추출.
-    스크롤로 lazy-load 이미지도 강제 로딩.
+    범용 이미지 추출:
+    - img 태그 (src / data-src / srcset 등 20+ 속성)
+    - CSS background-image (인라인 + 주요 컨테이너)
+    - picture > source srcset
+    - 모든 iframe 내부
+    - 상대 경로 → 절대 URL 자동 변환
     """
-    # 스크롤해서 lazy-load 이미지 강제 로딩
     await _scroll_to_bottom(page)
+    await page.wait_for_timeout(1500)   # JS 렌더링 추가 대기
 
-    seen = set()
-    urls = []
+    seen: set = set()
+    urls: list = []
+
+    JS = """
+    () => {
+        const seen = new Set();
+        const out  = [];
+
+        function add(raw) {
+            if (!raw) return;
+            raw = raw.trim();
+            if (!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return;
+            try {
+                const abs = new URL(raw, location.href).href;
+                if (!seen.has(abs)) { seen.add(abs); out.push(abs); }
+            } catch(e) {}
+        }
+
+        // ── 1. img 태그 ──────────────────────────────
+        const IMG_ATTRS = [
+            'src','data-src','data-lazy-src','data-original','data-url',
+            'data-img','data-image','data-lazy','data-delayed-url',
+            'data-actualsrc','data-echo','data-hi-res-src','data-zoom-image',
+            'data-large','data-full','data-bg','data-background'
+        ];
+        document.querySelectorAll('img').forEach(img => {
+            for (const a of IMG_ATTRS) {
+                const v = img.getAttribute(a);
+                if (v && !v.startsWith('data:')) { add(v); break; }
+            }
+            // srcset / data-srcset
+            ['srcset','data-srcset'].forEach(a => {
+                const ss = img.getAttribute(a) || '';
+                ss.split(',').forEach(s => add(s.trim().split(/\s+/)[0]));
+            });
+        });
+
+        // ── 2. picture > source ───────────────────────
+        document.querySelectorAll('picture source').forEach(el => {
+            const ss = el.getAttribute('srcset') || el.getAttribute('data-srcset') || '';
+            ss.split(',').forEach(s => add(s.trim().split(/\s+/)[0]));
+        });
+
+        // ── 3. 인라인 CSS background-image ───────────
+        document.querySelectorAll('[style]').forEach(el => {
+            const bg = el.style.backgroundImage;
+            if (!bg || bg === 'none') return;
+            const matches = bg.match(/url\(["']?([^"')]+)["']?\)/g) || [];
+            matches.forEach(m => add(m.replace(/url\(["']?|["']?\)$/g, '')));
+        });
+
+        // ── 4. 주요 컨테이너 computed background ─────
+        const BG_SEL = [
+            '[class*="banner"],[class*="hero"],[class*="slide"],[class*="thumb"]',
+            '[class*="visual"],[class*="cover"],[class*="gallery"],[class*="product"]',
+            '[class*="card"],[class*="item"],[class*="image"],[class*="photo"]',
+            'section,article,figure'
+        ].join(',');
+        document.querySelectorAll(BG_SEL).forEach(el => {
+            try {
+                const bg = window.getComputedStyle(el).backgroundImage;
+                if (bg && bg !== 'none') {
+                    const m = bg.match(/url\(["']?([^"')]+)["']?\)/);
+                    if (m && m[1]) add(m[1]);
+                }
+            } catch(e) {}
+        });
+
+        // ── 5. a 태그가 이미지로 직접 링크 ──────────
+        document.querySelectorAll('a[href]').forEach(a => {
+            const h = a.getAttribute('href') || '';
+            if (/\.(jpe?g|png|webp|gif|bmp|tiff|avif)(\?|$)/i.test(h)) add(h);
+        });
+
+        return out;
+    }
+    """
 
     async def _collect(frame):
         try:
-            srcs = await frame.evaluate("""
-                () => {
-                    const attrs = ['src','data-src','data-lazy-src','data-original',
-                                   'data-url','data-img','data-image','data-lazy'];
-                    const imgs = Array.from(document.querySelectorAll('img'));
-                    const results = [];
-                    imgs.forEach(img => {
-                        for (const attr of attrs) {
-                            const v = img.getAttribute(attr);
-                            if (v && !v.startsWith('data:') && v.startsWith('http')) {
-                                results.push(v);
-                                break;
-                            }
-                        }
-                    });
-                    return results;
-                }
-            """)
+            srcs = await frame.evaluate(JS)
             for s in srcs:
-                s = s.split('?')[0]  # 쿼리스트링 제거
                 if s not in seen:
                     seen.add(s)
                     urls.append(s)
         except Exception:
             pass
 
-    # 메인 프레임
     await _collect(page.main_frame)
 
-    # 모든 iframe 탐색
     frames = page.frames
     if len(frames) > 1:
-        log_fn(f"  iframe {len(frames)-1}개 탐색 중...")
-    for frame in frames[1:]:
-        await _collect(frame)
+        log_fn(f"  iframe {len(frames) - 1}개 탐색 중...")
+        for frame in frames[1:]:
+            await _collect(frame)
 
-    log_fn(f"  이미지 {len(urls)}개 발견 (iframe 포함)")
-    return list(dict.fromkeys(urls))
+    log_fn(f"  이미지 {len(urls)}개 발견")
+    return urls
 
 
 async def _scroll_to_bottom(page):
