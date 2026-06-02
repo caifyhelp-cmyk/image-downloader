@@ -145,6 +145,26 @@ def decode_unicode(obj):
     return obj
 
 
+def clean_url(url: str) -> str:
+    """
+    모바일/트래킹 파라미터 제거 → 데스크탑 버전으로 접근
+    - site_preference=device → 모바일 강제 전환 파라미터 (네이버)
+    - NaPm, utm_*, fbclid 등 추적 파라미터
+    """
+    parsed = urllib.parse.urlparse(url)
+    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    _STRIP = {
+        'site_preference',                          # 네이버 모바일 강제
+        'NaPm',                                     # 네이버 트래킹
+        'utm_source', 'utm_medium', 'utm_campaign',
+        'utm_content', 'utm_term', 'utm_id',
+        'fbclid', 'gclid', 'msclkid',
+        '_ga', '_gl',
+    }
+    cleaned = {k: v for k, v in qs.items() if k not in _STRIP}
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(cleaned, doseq=True)))
+
+
 def get_base_url(url: str) -> str:
     p = urllib.parse.urlparse(url)
     return f"{p.scheme}://{p.netloc}"
@@ -477,6 +497,12 @@ async def extract_all_images(page, log_fn) -> list:
 
     async def _collect(frame, scroll=False):
         try:
+            # iframe 로드 완료 대기
+            try:
+                await frame.wait_for_load_state("domcontentloaded", timeout=8000)
+            except Exception:
+                pass
+
             # iframe 내부도 스크롤 (lazy-load 트리거)
             if scroll:
                 try:
@@ -575,15 +601,23 @@ async def expand_detail_content(page, log_fn):
     """
     # 1. 상품 상세 탭 클릭
     detail_tab_texts = [
-        "상품 상세", "상세 정보", "상품정보", "상품 설명",
-        "상세설명", "상세보기", "제품 상세", "Product Detail",
+        "상품정보",           # 네이버 스마트스토어 실제 탭명
+        "상품 상세",
+        "상세 정보",
+        "상품 설명",
+        "상세설명",
+        "상세보기",
+        "제품 상세",
+        "상품상세",
+        "Product Detail",
+        "상품정보보기",
     ]
     for text in detail_tab_texts:
         try:
             loc = page.locator(f"text={text}").first
             if await loc.is_visible(timeout=800):
                 await loc.click()
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(3000)   # iframe 로드 대기
                 log_fn(f"  탭 클릭: {text}")
                 break
         except Exception:
@@ -659,6 +693,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
                        filter_text: str = "", api_key: str = ""):
     from playwright.async_api import async_playwright
 
+    url = clean_url(url)
     base_url = get_base_url(url)
 
     async with async_playwright() as p:
@@ -783,6 +818,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
                          filter_text: str = "", api_key: str = ""):
     from playwright.async_api import async_playwright
 
+    url = clean_url(url)
     base_url = get_base_url(url)
 
     async with async_playwright() as p:
