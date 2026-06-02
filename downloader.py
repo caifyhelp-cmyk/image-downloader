@@ -224,29 +224,62 @@ async def extract_all_images(page, log_fn) -> list:
             } catch(e) {}
         }
 
+        // srcset 파싱 → 가장 넓은(고해상도) URL 반환
+        function bestFromSrcset(ss) {
+            if (!ss) return null;
+            const candidates = ss.split(',').map(s => {
+                const parts = s.trim().split(/\s+/);
+                const url   = parts[0];
+                const desc  = parts[1] || '';
+                const w = desc.endsWith('w') ? parseInt(desc) : 0;
+                const x = desc.endsWith('x') ? parseFloat(desc) * 1000 : 0;
+                return { url, score: w || x || 1 };
+            }).filter(c => c.url);
+            if (!candidates.length) return null;
+            candidates.sort((a, b) => b.score - a.score);
+            return candidates[0].url;
+        }
+
         // ── 1. img 태그 ──────────────────────────────
-        const IMG_ATTRS = [
-            'src','data-src','data-lazy-src','data-original','data-url',
-            'data-img','data-image','data-lazy','data-delayed-url',
-            'data-actualsrc','data-echo','data-hi-res-src','data-zoom-image',
-            'data-large','data-full','data-bg','data-background'
+        // 고해상도 속성 우선, 그 다음 일반 속성
+        const HI_RES = [
+            'data-zoom-image','data-large','data-full','data-hi-res-src',
+            'data-original','data-big','data-original-src','data-max-src'
         ];
+        const STD = [
+            'data-src','data-lazy-src','data-url','data-img','data-image',
+            'data-lazy','data-delayed-url','data-actualsrc','data-echo',
+            'data-bg','data-background','src'
+        ];
+
         document.querySelectorAll('img').forEach(img => {
-            for (const a of IMG_ATTRS) {
-                const v = img.getAttribute(a);
-                if (v && !v.startsWith('data:')) { add(v); break; }
+            // srcset 먼저 (가장 큰 버전)
+            let srcsetUrl = null;
+            for (const a of ['srcset','data-srcset']) {
+                srcsetUrl = bestFromSrcset(img.getAttribute(a));
+                if (srcsetUrl) break;
             }
-            // srcset / data-srcset
-            ['srcset','data-srcset'].forEach(a => {
-                const ss = img.getAttribute(a) || '';
-                ss.split(',').forEach(s => add(s.trim().split(/\s+/)[0]));
-            });
+            if (srcsetUrl) add(srcsetUrl);
+
+            // 고해상도 속성
+            let found = false;
+            for (const a of HI_RES) {
+                const v = img.getAttribute(a);
+                if (v && !v.startsWith('data:')) { add(v); found = true; break; }
+            }
+            // 일반 속성 (고해상도 없을 때)
+            if (!found) {
+                for (const a of STD) {
+                    const v = img.getAttribute(a);
+                    if (v && !v.startsWith('data:')) { add(v); break; }
+                }
+            }
         });
 
-        // ── 2. picture > source ───────────────────────
+        // ── 2. picture > source (가장 큰 srcset) ────
         document.querySelectorAll('picture source').forEach(el => {
-            const ss = el.getAttribute('srcset') || el.getAttribute('data-srcset') || '';
-            ss.split(',').forEach(s => add(s.trim().split(/\s+/)[0]));
+            const url = bestFromSrcset(el.getAttribute('srcset') || el.getAttribute('data-srcset'));
+            if (url) add(url);
         });
 
         // ── 3. 인라인 CSS background-image ───────────
