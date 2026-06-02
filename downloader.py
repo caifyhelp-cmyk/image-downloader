@@ -531,15 +531,26 @@ async def extract_all_images(page, log_fn) -> list:
         except Exception:
             pass
 
-    await _collect(page.main_frame, scroll=False)  # 메인 프레임은 이미 스크롤됨
+    await _collect(page.main_frame, scroll=False)
+    main_count = len(urls)
+    log_fn(f"  메인프레임: {main_count}개")
+    # 처음 5개 URL 로그 (디버그)
+    for u in urls[:5]:
+        log_fn(f"    → {u[:90]}")
 
     frames = page.frames
     if len(frames) > 1:
         log_fn(f"  iframe {len(frames) - 1}개 탐색 중...")
         for frame in frames[1:]:
-            await _collect(frame, scroll=True)  # iframe은 내부 스크롤 포함
+            before = len(urls)
+            await _collect(frame, scroll=True)
+            added = len(urls) - before
+            try:
+                log_fn(f"    iframe[{frame.url[:60]}]: {added}개")
+            except Exception:
+                log_fn(f"    iframe: {added}개")
 
-    log_fn(f"  이미지 {len(urls)}개 발견")
+    log_fn(f"  ─ 총 {len(urls)}개 발견 ─")
     return urls
 
 
@@ -847,9 +858,12 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
 
         log_fn(f"접속 중: {url}")
         await goto_and_wait(page, url, log_fn)
-        await expand_detail_content(page, log_fn)   # 상품 상세 탭 클릭
+        log_fn(f"  페이지 로드 완료, 탭/펼치기 처리 중...")
+        await expand_detail_content(page, log_fn)
         await click_more_buttons(page, log_fn)
+        await page.wait_for_timeout(3000)  # 탭 클릭 후 콘텐츠 로딩 대기
         html = await page.content()
+        log_fn(f"  HTML 크기: {len(html):,}자, 프레임: {len(page.frames)}개")
 
         projects = parse_portfolio_list(html)
 
