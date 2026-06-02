@@ -686,6 +686,92 @@ async def click_next_page(page) -> bool:
 
 
 # ══════════════════════════════════════════════
+#  네이버 스마트스토어 전용 직접 파싱
+# ══════════════════════════════════════════════
+
+def _smartstore_fetch_images(url: str, log_fn) -> list:
+    """
+    requests로 HTML 직접 수신 → __NEXT_DATA__ + detailContents 파싱.
+    headless 브라우저 탐지 완전 우회.
+    서버는 JS 실행 안 하므로 일반 HTTP 클라이언트와 동일하게 응답.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "no-cache",
+    }
+
+    images = []
+    seen = set()
+
+    def add(u):
+        if not u or not isinstance(u, str): return
+        u = u.strip()
+        if not u.startswith("http") or u.startswith("data:"): return
+        norm = normalize_img_url(u)
+        if norm and norm not in seen:
+            seen.add(norm)
+            images.append(norm)
+
+    def flatten(obj, depth=0):
+        if depth > 15 or not obj: return
+        if isinstance(obj, str):
+            if re.search(r'\.(jpe?g|png|webp|gif|bmp)', obj, re.I) and obj.startswith("http"):
+                add(obj)
+        elif isinstance(obj, list):
+            for v in obj: flatten(v, depth + 1)
+        elif isinstance(obj, dict):
+            for v in obj.values(): flatten(v, depth + 1)
+
+    try:
+        res = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+        html = res.text
+        log_fn(f"  직접 요청: HTTP {res.status_code}, {len(html):,}자")
+
+        # ── 1. __NEXT_DATA__ JSON 전체 순회 ───────────
+        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(1))
+                flatten(data)
+                log_fn(f"  __NEXT_DATA__: {len(images)}개 추출")
+            except Exception as e:
+                log_fn(f"  JSON 파싱 오류: {e}")
+
+        # ── 2. detailContents (상품 상세 HTML) 별도 파싱 ──
+        dc_m = re.search(r'"detailContents"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+        if dc_m:
+            detail_html = dc_m.group(1).encode('utf-8').decode('unicode_escape')
+            img_srcs = re.findall(r'src=["\'](https?://[^"\']+)["\']', detail_html, re.I)
+            before = len(images)
+            for s in img_srcs:
+                add(s)
+            log_fn(f"  detailContents: {len(images) - before}개 추가")
+
+        # ── 3. 일반 img 태그 ──────────────────────────
+        img_srcs = re.findall(
+            r'<img[^>]+(?:src|data-src|data-original)=["\']([^"\']+)["\']', html, re.I)
+        for s in img_srcs:
+            add(s)
+
+    except Exception as e:
+        log_fn(f"  직접 요청 실패: {e}")
+
+    return images
+
+
+# ══════════════════════════════════════════════
 #  이미지 다운로드 모드
 # ══════════════════════════════════════════════
 
@@ -695,6 +781,30 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
 
     url = clean_url(url)
     base_url = get_base_url(url)
+
+    # ── 네이버 스마트스토어: 브라우저 없이 직접 파싱 ──
+    if "smartstore.naver.com" in url:
+        log_fn("네이버 스마트스토어 감지 → 직접 파싱 모드")
+        img_urls = _smartstore_fetch_images(url, log_fn)
+        if img_urls:
+            if filter_text:
+                img_urls = await _vision_filter_urls(img_urls, filter_text, api_key, base_url, log_fn)
+            log_fn(f"이미지 {len(img_urls)}개 저장")
+            save_dir.mkdir(parents=True, exist_ok=True)
+            ok = 0
+            for i, img_url in enumerate(img_urls, 1):
+                if stop_event.is_set(): break
+                ext = img_url.split('.')[-1].split('?')[0].lower()
+                if ext not in ('jpg', 'jpeg', 'png', 'webp', 'gif'): ext = 'jpg'
+                sp = save_dir / f"{i:03d}.{ext}"
+                if download_file(img_url, sp, base_url):
+                    log_fn(f"  [{i:03d}] OK ({sp.stat().st_size // 1024}KB)")
+                    ok += 1
+                progress_fn(i, len(img_urls))
+                time.sleep(0.1)
+            log_fn(f"\n완료! {ok}/{len(img_urls)}개 저장")
+            return
+        log_fn("  직접 파싱 실패 → 브라우저 모드로 전환")
 
     async with async_playwright() as p:
         browser = await _launch_browser(p, log_fn)
