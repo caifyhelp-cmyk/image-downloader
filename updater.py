@@ -197,6 +197,7 @@ def _make_swap_script(current_exe: Path, new_exe: Path) -> Path:
         "Start-Sleep -Seconds 3\n"
         f"$src = '{src}'\n"
         f"$dst = '{dst}'\n"
+        # 파일 교체 (최대 3회 재시도)
         "for ($i = 0; $i -lt 3; $i++) {\n"
         "    try {\n"
         "        Move-Item -Force -Path $src -Destination $dst -ErrorAction Stop\n"
@@ -205,6 +206,11 @@ def _make_swap_script(current_exe: Path, new_exe: Path) -> Path:
         "        Start-Sleep -Seconds 2\n"
         "    }\n"
         "}\n"
+        # 파일시스템 안정화 대기
+        "Start-Sleep -Seconds 1\n"
+        # Zone.Identifier 제거 (인터넷 다운로드 차단 해제)
+        "Unblock-File -Path $dst -ErrorAction SilentlyContinue\n"
+        # 새 exe 실행
         "Start-Process -FilePath $dst\n"
         "Remove-Item -Force -Path $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue\n"
     )
