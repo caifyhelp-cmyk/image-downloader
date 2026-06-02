@@ -15,32 +15,47 @@ from vision_matcher import fetch_and_check, check_image_matches
 #  브라우저 실행 (여러 방법 순서대로 시도)
 # ══════════════════════════════════════════════
 
-async def _launch_browser(p):
+async def _launch_browser(p, log_fn=None):
     """
     브라우저 실행 우선순위:
-    1. 시스템 Chrome (설치된 경우)
-    2. ms-playwright chromium (경로 직접 지정)
-    3. playwright 기본 경로 (개발 환경 fallback)
+    1. Microsoft Edge  (Windows 10/11 기본 설치)
+    2. 시스템 Chrome
+    3. ms-playwright chromium (재귀 탐색)
+    4. playwright 기본 경로 (개발 환경)
     """
     from browser_setup import system_chrome, find_ms_playwright_chromium
 
-    # 1. 시스템 Chrome
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    # 1. Microsoft Edge (Windows 기본 내장)
+    try:
+        _log("브라우저: Edge 시도...")
+        return await p.chromium.launch(headless=True, channel="msedge")
+    except Exception as e:
+        _log(f"Edge 없음: {e}")
+
+    # 2. 시스템 Chrome
     chrome = system_chrome()
     if chrome:
         try:
+            _log(f"브라우저: Chrome 시도 ({chrome})")
             return await p.chromium.launch(headless=True, executable_path=chrome)
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"Chrome 실패: {e}")
 
-    # 2. ms-playwright chromium (ensure_browser_sync 로 설치된 것)
+    # 3. ms-playwright chromium (재귀 탐색)
     exe = find_ms_playwright_chromium()
     if exe:
         try:
+            _log(f"브라우저: Chromium 시도 ({exe})")
             return await p.chromium.launch(headless=True, executable_path=exe)
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"Chromium 실패: {e}")
 
-    # 3. 기본 (개발 환경)
+    # 4. 개발 환경 fallback
+    _log("브라우저: 기본 경로 시도...")
     return await p.chromium.launch(headless=True)
 
 BASE_HEADERS = {
@@ -231,7 +246,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
     base_url = get_base_url(url)
 
     async with async_playwright() as p:
-        browser = await _launch_browser(p)
+        browser = await _launch_browser(p, log_fn)
         page = await browser.new_page()
 
         log_fn(f"접속 중: {url}")
@@ -354,7 +369,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
     base_url = get_base_url(url)
 
     async with async_playwright() as p:
-        browser = await _launch_browser(p)
+        browser = await _launch_browser(p, log_fn)
         page = await browser.new_page(viewport={"width": 1440, "height": 900})
 
         log_fn(f"접속 중: {url}")

@@ -27,13 +27,12 @@ def system_chrome() -> str:
 
 
 def find_ms_playwright_chromium() -> str:
-    """ms-playwright 폴더에서 chromium 실행파일 탐색"""
-    patterns = [
-        str(MS_PW / "chromium_headless_shell-*" / "chrome-headless-shell-win64" / "chrome-headless-shell.exe"),
-        str(MS_PW / "chromium-*" / "chrome-win" / "chrome.exe"),
-    ]
-    for pat in patterns:
-        found = glob.glob(pat)
+    """ms-playwright 폴더에서 chromium 실행파일 재귀 탐색"""
+    if not MS_PW.exists():
+        return ""
+    # 버전 숫자 무관하게 재귀 탐색
+    for name in ("chrome-headless-shell.exe", "chrome.exe"):
+        found = glob.glob(str(MS_PW / "**" / name), recursive=True)
         if found:
             return found[0]
     return ""
