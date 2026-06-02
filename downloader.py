@@ -15,6 +15,22 @@ from vision_matcher import fetch_and_check, check_image_matches
 #  브라우저 실행 (여러 방법 순서대로 시도)
 # ══════════════════════════════════════════════
 
+_STEALTH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-infobars",
+    "--window-size=1920,1080",
+]
+
+_STEALTH_SCRIPT = """
+    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    Object.defineProperty(navigator, 'plugins',   {get: () => [1,2,3,4,5]});
+    Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR','ko','en-US','en']});
+    window.chrome = { runtime: {} };
+"""
+
+
 async def _launch_browser(p, log_fn=None):
     """
     브라우저 실행 우선순위:
@@ -32,7 +48,7 @@ async def _launch_browser(p, log_fn=None):
     # 1. Microsoft Edge (Windows 기본 내장)
     try:
         _log("브라우저: Edge 시도...")
-        return await p.chromium.launch(headless=True, channel="msedge")
+        return await p.chromium.launch(headless=True, channel="msedge", args=_STEALTH_ARGS)
     except Exception as e:
         _log(f"Edge 없음: {e}")
 
@@ -40,8 +56,8 @@ async def _launch_browser(p, log_fn=None):
     chrome = system_chrome()
     if chrome:
         try:
-            _log(f"브라우저: Chrome 시도 ({chrome})")
-            return await p.chromium.launch(headless=True, executable_path=chrome)
+            _log(f"브라우저: Chrome 시도...")
+            return await p.chromium.launch(headless=True, executable_path=chrome, args=_STEALTH_ARGS)
         except Exception as e:
             _log(f"Chrome 실패: {e}")
 
@@ -49,14 +65,34 @@ async def _launch_browser(p, log_fn=None):
     exe = find_ms_playwright_chromium()
     if exe:
         try:
-            _log(f"브라우저: Chromium 시도 ({exe})")
-            return await p.chromium.launch(headless=True, executable_path=exe)
+            _log(f"브라우저: Chromium 시도...")
+            return await p.chromium.launch(headless=True, executable_path=exe, args=_STEALTH_ARGS)
         except Exception as e:
             _log(f"Chromium 실패: {e}")
 
     # 4. 개발 환경 fallback
     _log("브라우저: 기본 경로 시도...")
-    return await p.chromium.launch(headless=True)
+    return await p.chromium.launch(headless=True, args=_STEALTH_ARGS)
+
+
+async def _new_stealth_page(browser):
+    """봇 탐지 우회 설정이 적용된 페이지 생성"""
+    ctx = await browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+        ),
+        viewport={"width": 1920, "height": 1080},
+        locale="ko-KR",
+        extra_http_headers={
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        }
+    )
+    page = await ctx.new_page()
+    await page.add_init_script(_STEALTH_SCRIPT)
+    return page
 
 BASE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -434,7 +470,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
 
     async with async_playwright() as p:
         browser = await _launch_browser(p, log_fn)
-        page = await browser.new_page()
+        page = await _new_stealth_page(browser)
 
         log_fn(f"접속 중: {url}")
         await goto_and_wait(page, url, log_fn)
@@ -557,7 +593,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
 
     async with async_playwright() as p:
         browser = await _launch_browser(p, log_fn)
-        page = await browser.new_page(viewport={"width": 1440, "height": 900})
+        page = await _new_stealth_page(browser)
 
         log_fn(f"접속 중: {url}")
         await goto_and_wait(page, url, log_fn)
