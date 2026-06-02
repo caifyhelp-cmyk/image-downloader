@@ -434,6 +434,10 @@ class App(tk.Tk):
 
         def worker():
             try:
+                # 브라우저 없으면 여기서 자동 설치 (동기, UI 블록 없음)
+                from browser_setup import ensure_browser_sync
+                ensure_browser_sync(self.log)
+
                 if is_screenshot:
                     asyncio.run(run_screenshot(
                         url, save_dir, self.log, self.set_progress,
@@ -463,14 +467,13 @@ class App(tk.Tk):
             self.log("⚠ playwright 패키지 없음 — 개발 환경에서 실행:")
             self.log("  pip install playwright\n")
             return
-
-        # 브라우저 없으면 자동 설치
-        from browser_setup import ensure_browser
-        ensure_browser(
-            log_fn=self.log,
-            on_ready=lambda: None,
-            on_fail=lambda msg: self.log(f"⚠ {msg}")
-        )
+        from browser_setup import _chromium_exists, system_chrome, find_ms_playwright_chromium
+        if system_chrome():
+            self.log(f"브라우저: 시스템 Chrome 사용")
+        elif find_ms_playwright_chromium():
+            self.log(f"브라우저: Playwright Chromium 사용")
+        else:
+            self.log("브라우저 없음 — ▶ 시작 시 자동 설치됩니다 (최초 1회)")
 
 
 # ══════════════════════════════════════════════

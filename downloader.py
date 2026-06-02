@@ -15,44 +15,32 @@ from vision_matcher import fetch_and_check, check_image_matches
 #  브라우저 실행 (여러 방법 순서대로 시도)
 # ══════════════════════════════════════════════
 
-def _find_chromium_exe() -> str:
-    """ms-playwright 폴더에서 chromium 실행파일 탐색"""
-    import glob
-    from pathlib import Path as _Path
-    base = _Path.home() / "AppData" / "Local" / "ms-playwright"
-    patterns = [
-        str(base / "chromium_headless_shell-*" / "chrome-headless-shell-win64" / "chrome-headless-shell.exe"),
-        str(base / "chromium-*" / "chrome-win" / "chrome.exe"),
-    ]
-    for pat in patterns:
-        found = glob.glob(pat)
-        if found:
-            return found[0]
-    return ""
-
-
 async def _launch_browser(p):
     """
     브라우저 실행 우선순위:
-    1. 시스템에 설치된 Google Chrome (별도 다운로드 불필요)
-    2. ms-playwright 경로에 직접 설치된 chromium
-    3. playwright 기본 경로 (개발 환경)
+    1. 시스템 Chrome (설치된 경우)
+    2. ms-playwright chromium (경로 직접 지정)
+    3. playwright 기본 경로 (개발 환경 fallback)
     """
-    # 1. 시스템 Chrome
-    try:
-        return await p.chromium.launch(headless=True, channel="chrome")
-    except Exception:
-        pass
+    from browser_setup import system_chrome, find_ms_playwright_chromium
 
-    # 2. ms-playwright 직접 경로
-    exe = _find_chromium_exe()
+    # 1. 시스템 Chrome
+    chrome = system_chrome()
+    if chrome:
+        try:
+            return await p.chromium.launch(headless=True, executable_path=chrome)
+        except Exception:
+            pass
+
+    # 2. ms-playwright chromium (ensure_browser_sync 로 설치된 것)
+    exe = find_ms_playwright_chromium()
     if exe:
         try:
             return await p.chromium.launch(headless=True, executable_path=exe)
         except Exception:
             pass
 
-    # 3. 기본 (개발 환경 fallback)
+    # 3. 기본 (개발 환경)
     return await p.chromium.launch(headless=True)
 
 BASE_HEADERS = {
