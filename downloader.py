@@ -250,7 +250,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
         page = await browser.new_page()
 
         log_fn(f"접속 중: {url}")
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         await click_more_buttons(page, log_fn)
         html = await page.content()
 
@@ -322,7 +322,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
             if seed_id:
                 detail_url = f"{base_url}/home/info/{seed_id}"
                 try:
-                    await page.goto(detail_url, wait_until="networkidle", timeout=30000)
+                    await page.goto(detail_url, wait_until="domcontentloaded", timeout=60000)
                     img_urls = extract_og_images(await page.content(), base_url)
                 except Exception as e:
                     log_fn(f"  오류: {e}")
@@ -373,7 +373,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
         page = await browser.new_page(viewport={"width": 1440, "height": 900})
 
         log_fn(f"접속 중: {url}")
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         await click_more_buttons(page, log_fn)
         html = await page.content()
 
@@ -418,7 +418,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
             if seed_id:
                 detail_url = f"{base_url}/home/info/{seed_id}"
                 try:
-                    await page.goto(detail_url, wait_until="networkidle", timeout=30000)
+                    await page.goto(detail_url, wait_until="domcontentloaded", timeout=60000)
                     await page.wait_for_timeout(500)
                     screenshot_path = save_dir / f"{idx:03d}_{folder_name}.png"
                     await page.screenshot(path=str(screenshot_path), full_page=True)
