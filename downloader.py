@@ -339,6 +339,28 @@ async def extract_all_images(page, log_fn) -> list:
     return urls
 
 
+async def goto_and_wait(page, url: str, log_fn):
+    """
+    페이지 이동 후 SPA(React/Vue 등) 렌더링까지 기다림.
+    1) domcontentloaded 즉시 완료
+    2) networkidle 최대 20초 추가 대기 (SPA 렌더링)
+    3) img 태그 등장 최대 10초 대기
+    """
+    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+    # SPA 렌더링 대기 (타임아웃 무시)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+
+    # img 태그가 실제로 DOM에 나타날 때까지 대기
+    try:
+        await page.wait_for_selector("img", timeout=10000)
+    except Exception:
+        pass
+
+
 async def _scroll_to_bottom(page):
     """페이지 끝까지 스크롤해서 lazy-load 이미지 강제 로딩"""
     try:
@@ -415,7 +437,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
         page = await browser.new_page()
 
         log_fn(f"접속 중: {url}")
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        await goto_and_wait(page, url, log_fn)
         await click_more_buttons(page, log_fn)
         html = await page.content()
 
@@ -425,6 +447,11 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
             log_fn("포트폴리오 목록 없음 → 페이지 이미지 전체 다운로드")
             img_urls = extract_og_images(html, base_url)
             if not img_urls:
+                img_urls = await extract_all_images(page, log_fn)
+            # 0개면 3초 더 기다렸다 재시도 (느린 SPA 대응)
+            if not img_urls:
+                log_fn("  이미지 없음 — 3초 추가 대기 후 재시도...")
+                await page.wait_for_timeout(3000)
                 img_urls = await extract_all_images(page, log_fn)
 
             # 필터 적용 (Vision 포함)
@@ -482,7 +509,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
             if seed_id:
                 detail_url = f"{base_url}/home/info/{seed_id}"
                 try:
-                    await page.goto(detail_url, wait_until="domcontentloaded", timeout=60000)
+                    await goto_and_wait(page, detail_url, log_fn)
                     img_urls = extract_og_images(await page.content(), base_url)
                 except Exception as e:
                     log_fn(f"  오류: {e}")
@@ -533,7 +560,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
         page = await browser.new_page(viewport={"width": 1440, "height": 900})
 
         log_fn(f"접속 중: {url}")
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        await goto_and_wait(page, url, log_fn)
         await click_more_buttons(page, log_fn)
         html = await page.content()
 
@@ -579,7 +606,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
             if seed_id:
                 detail_url = f"{base_url}/home/info/{seed_id}"
                 try:
-                    await page.goto(detail_url, wait_until="domcontentloaded", timeout=60000)
+                    await goto_and_wait(page, detail_url, log_fn)
                     await page.wait_for_timeout(500)
                     screenshot_path = save_dir / f"{idx:03d}_{folder_name}.png"
                     await page.screenshot(path=str(screenshot_path), full_page=True)
