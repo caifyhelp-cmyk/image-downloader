@@ -4,6 +4,7 @@ GitHub: caifyhelp-cmyk/image-downloader
 """
 
 import asyncio
+import json
 import os
 import sys
 import threading
@@ -21,6 +22,23 @@ try:
 except ImportError:
     PLAYWRIGHT_OK = False
 
+CONFIG_PATH = Path.home() / ".image_downloader_config.json"
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_config(data: dict):
+    try:
+        CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+    except Exception:
+        pass
+
 
 # ══════════════════════════════════════════════
 #  색상
@@ -35,15 +53,14 @@ FG2     = "#94a3b8"
 RED     = "#f87171"
 ENTRY   = "#1e293b"
 YELLOW  = "#fbbf24"
+GREEN   = "#4ade80"
 
 
 # ══════════════════════════════════════════════
-#  업데이트 스플래시 (앱 시작 시 표시)
+#  업데이트 스플래시
 # ══════════════════════════════════════════════
 
 class SplashScreen(tk.Tk):
-    """앱 시작 시 업데이트 확인 중 표시하는 작은 창"""
-
     def __init__(self):
         super().__init__()
         self.title("이미지 다운로더")
@@ -60,11 +77,9 @@ class SplashScreen(tk.Tk):
                  bg=BG, fg=ACCENT2, font=("Malgun Gothic", 13, "bold")).pack(pady=(22, 6))
         tk.Label(self, text=f"v{VERSION}", bg=BG, fg=FG2,
                  font=("Malgun Gothic", 9)).pack()
-
         self.status = tk.Label(self, text="업데이트 확인 중...",
                                bg=BG, fg=YELLOW, font=("Malgun Gothic", 9))
         self.status.pack(pady=(10, 0))
-
         self.bar = ttk.Progressbar(self, mode="indeterminate", length=320)
         self.bar.pack(pady=8)
         self.bar.start(12)
@@ -89,10 +104,11 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"이미지 다운로더  v{VERSION}")
-        self.geometry("760x680")
-        self.minsize(600, 560)
+        self.geometry("780x720")
+        self.minsize(620, 600)
         self.configure(bg=BG)
         self.stop_event = threading.Event()
+        self._cfg = load_config()
         self._build_ui()
         self._check_playwright()
 
@@ -110,12 +126,13 @@ class App(tk.Tk):
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True, padx=24, pady=16)
 
-        # URL
+        # ── Row 0: URL ──
         self._row(body, "URL", 0)
-        self.url_var = tk.StringVar(
-            value="https://www.charmspace.co.kr/home/sub/official_project")
         url_frame = tk.Frame(body, bg=BG)
         url_frame.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=6)
+        self.url_var = tk.StringVar(
+            value=self._cfg.get("last_url",
+                  "https://www.charmspace.co.kr/home/sub/official_project"))
         self._url_entry = tk.Entry(url_frame, textvariable=self.url_var,
                  bg=ENTRY, fg=FG, insertbackground=FG,
                  relief="flat", font=("Consolas", 10), bd=6)
@@ -125,12 +142,13 @@ class App(tk.Tk):
                   command=self._paste_url, cursor="hand2"
                   ).pack(side="left", padx=(6, 0))
 
-        # 저장 경로
+        # ── Row 1: 저장 폴더 ──
         self._row(body, "저장 폴더", 1)
-        self.dir_var = tk.StringVar(
-            value=str(Path.home() / "Desktop" / "downloaded_images"))
         dir_frame = tk.Frame(body, bg=BG)
         dir_frame.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=6)
+        self.dir_var = tk.StringVar(
+            value=self._cfg.get("last_dir",
+                  str(Path.home() / "Desktop" / "downloaded_images")))
         tk.Entry(dir_frame, textvariable=self.dir_var,
                  bg=ENTRY, fg=FG, insertbackground=FG,
                  relief="flat", font=("Consolas", 10), bd=6
@@ -140,24 +158,57 @@ class App(tk.Tk):
                   command=self._browse, cursor="hand2"
                   ).pack(side="left", padx=(6, 0))
 
-        # 필터 텍스트
+        # ── Row 2: 필터 텍스트 ──
         self._row(body, "필터 텍스트", 2)
         filter_frame = tk.Frame(body, bg=BG)
         filter_frame.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=6)
-        self.filter_var = tk.StringVar()
-        filter_entry = tk.Entry(filter_frame, textvariable=self.filter_var,
+        self.filter_var = tk.StringVar(value=self._cfg.get("last_filter", ""))
+        tk.Entry(filter_frame, textvariable=self.filter_var,
                  bg=ENTRY, fg=FG, insertbackground=FG,
-                 relief="flat", font=("Malgun Gothic", 10), bd=6)
-        filter_entry.pack(side="left", fill="x", expand=True)
+                 relief="flat", font=("Malgun Gothic", 10), bd=6
+                 ).pack(side="left", fill="x", expand=True)
         tk.Label(filter_frame, text=" 빈칸이면 전체",
-                 bg=BG, fg=FG2, font=("Malgun Gothic", 8)).pack(side="left", padx=(8, 0))
+                 bg=BG, fg=FG2, font=("Malgun Gothic", 8)
+                 ).pack(side="left", padx=(8, 0))
 
-        # 모드 선택
+        # ── Row 3: AI 분석 키 ──
+        self._row(body, "AI 분석 키", 3)
+        key_frame = tk.Frame(body, bg=BG)
+        key_frame.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=6)
+        self.api_key_var = tk.StringVar(value=self._cfg.get("api_key", ""))
+        self._key_entry = tk.Entry(key_frame, textvariable=self.api_key_var,
+                 bg=ENTRY, fg=FG, insertbackground=FG,
+                 relief="flat", font=("Consolas", 9), bd=6, show="•")
+        self._key_entry.pack(side="left", fill="x", expand=True)
+        tk.Button(key_frame, text=" 저장 ", bg=CARD, fg=FG2, relief="flat",
+                  font=("Malgun Gothic", 9), pady=4,
+                  command=self._save_api_key, cursor="hand2"
+                  ).pack(side="left", padx=(6, 0))
+        self._key_status = tk.Label(key_frame, text="", bg=BG, fg=GREEN,
+                                    font=("Malgun Gothic", 8))
+        self._key_status.pack(side="left", padx=(6, 0))
+        # 저장된 키 있으면 상태 표시
+        if self.api_key_var.get():
+            self._key_status.config(text="✓ 저장됨", fg=GREEN)
+
+        # ── Row 3 설명 ──
+        tk.Label(body,
+                 text="  Claude API 키 입력 시 이미지에 텍스트가 없어도 AI가 이미지 내용을 분석해 매칭합니다.",
+                 bg=BG, fg=FG2, font=("Malgun Gothic", 8), anchor="w"
+                 ).grid(row=3, column=0, columnspan=2, sticky="w",
+                        padx=(0, 0), pady=(0, 0))
+        # (설명 라벨은 row 3 아래에 별도 row로)
+        tk.Label(body,
+                 text="  ↑  Claude API 키: 이미지에 텍스트가 없어도 이미지 내용 AI 분석 후 매칭",
+                 bg=BG, fg=FG2, font=("Malgun Gothic", 8), anchor="w"
+                 ).grid(row=4, column=0, columnspan=2, sticky="w", padx=(4, 0))
+
+        # ── Row 5: 스크린샷 모드 ──
         mode_frame = tk.Frame(body, bg=BG)
-        mode_frame.grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 6))
+        mode_frame.grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 6))
         self.screenshot_mode = tk.BooleanVar(value=False)
         tk.Checkbutton(mode_frame,
-                       text="📸  스크린샷 캡처 모드  (이미지 다운 대신 페이지를 그대로 캡처)",
+                       text="스크린샷 캡처 모드  (이미지 다운 대신 페이지를 PNG로 캡처)",
                        variable=self.screenshot_mode,
                        bg=BG, fg=FG2, selectcolor=CARD, activebackground=BG,
                        activeforeground=ACCENT2,
@@ -166,9 +217,9 @@ class App(tk.Tk):
 
         body.columnconfigure(1, weight=1)
 
-        # 버튼
+        # ── Row 6: 버튼 ──
         btn_row = tk.Frame(body, bg=BG)
-        btn_row.grid(row=4, column=0, columnspan=2, pady=(8, 8))
+        btn_row.grid(row=6, column=0, columnspan=2, pady=(4, 8))
 
         self.btn_start = tk.Button(
             btn_row, text="▶  시작",
@@ -189,36 +240,35 @@ class App(tk.Tk):
                   command=self._open_dir, cursor="hand2"
                   ).pack(side="left", padx=5)
 
-        # 진행바
+        # ── Row 7: 진행바 ──
         self.progress = ttk.Progressbar(body, mode="determinate")
-        self.progress.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 2))
+        self.progress.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(4, 2))
         self.status_var = tk.StringVar(value="대기 중")
         tk.Label(body, textvariable=self.status_var, bg=BG, fg=FG2,
                  font=("Malgun Gothic", 9)
-                 ).grid(row=6, column=0, columnspan=2, sticky="w")
+                 ).grid(row=8, column=0, columnspan=2, sticky="w")
 
-        # 로그
+        # ── Row 9: 로그 ──
         self.log_box = scrolledtext.ScrolledText(
             body, bg=ENTRY, fg=FG, insertbackground=FG,
-            font=("Consolas", 9), relief="flat", bd=0, wrap="word", height=14)
-        self.log_box.grid(row=7, column=0, columnspan=2,
+            font=("Consolas", 9), relief="flat", bd=0, wrap="word", height=12)
+        self.log_box.grid(row=9, column=0, columnspan=2,
                           sticky="nsew", pady=(10, 0))
         self.log_box.config(state="disabled")
-        body.rowconfigure(7, weight=1)
+        body.rowconfigure(9, weight=1)
 
         # 푸터
         ft = tk.Frame(self, bg=PANEL, pady=6)
         ft.pack(fill="x", side="bottom")
         tk.Label(ft, text="github.com/caifyhelp-cmyk/image-downloader",
                  bg=PANEL, fg=FG2, font=("Malgun Gothic", 8)).pack(side="left", padx=16)
-        tk.Label(ft, text="URL만 바꾸면 다른 사이트도 지원",
+        tk.Label(ft, text="필터 텍스트 + AI 이미지 분석 지원",
                  bg=PANEL, fg=FG2, font=("Malgun Gothic", 8)).pack(side="right", padx=16)
 
-        # IME 비활성화 (URL 입력 필드 — 한글 입력기 간섭 방지)
+        # IME 비활성화 (URL 입력란)
         self.after(300, lambda: self._disable_ime(self._url_entry))
 
     def _disable_ime(self, widget):
-        """Windows 한글 IME를 URL 입력란에서 비활성화"""
         try:
             import ctypes
             hwnd = widget.winfo_id()
@@ -229,17 +279,25 @@ class App(tk.Tk):
     def _row(self, parent, label, row):
         tk.Label(parent, text=label, bg=BG, fg=FG2,
                  font=("Malgun Gothic", 10), anchor="e", width=9
-                 ).grid(row=row, column=0, sticky="e", pady=6)
+                 ).grid(row=row, column=0, sticky="ne", pady=8)
 
     # ── 이벤트 ────────────────────────────────
     def _paste_url(self):
-        """클립보드에서 URL 붙여넣기"""
         try:
             text = self.clipboard_get().strip()
             if text:
                 self.url_var.set(text)
         except Exception:
             pass
+
+    def _save_api_key(self):
+        key = self.api_key_var.get().strip()
+        self._cfg["api_key"] = key
+        save_config(self._cfg)
+        if key:
+            self._key_status.config(text="✓ 저장됨", fg=GREEN)
+        else:
+            self._key_status.config(text="삭제됨", fg=FG2)
 
     def _browse(self):
         d = filedialog.askdirectory()
@@ -276,9 +334,16 @@ class App(tk.Tk):
         if not url.startswith("http"):
             self.log("올바른 URL을 입력하세요.")
             return
+
         save_dir = Path(self.dir_var.get())
         filter_text = self.filter_var.get().strip()
+        api_key = self.api_key_var.get().strip()
         is_screenshot = self.screenshot_mode.get()
+
+        # 설정 저장
+        self._cfg.update({"last_url": url, "last_dir": str(save_dir),
+                          "last_filter": filter_text})
+        save_config(self._cfg)
 
         self.stop_event.clear()
         self.btn_start.config(state="disabled")
@@ -293,6 +358,10 @@ class App(tk.Tk):
         self.log(f"URL: {url}")
         if filter_text:
             self.log(f"필터: '{filter_text}'")
+            if api_key:
+                self.log("AI 이미지 분석: 활성화 (텍스트 미매칭 항목도 이미지 분석)")
+            else:
+                self.log("AI 이미지 분석: 비활성 (텍스트 매칭만 사용)")
         self.log(f"저장: {save_dir}\n")
 
         def worker():
@@ -300,11 +369,11 @@ class App(tk.Tk):
                 if is_screenshot:
                     asyncio.run(run_screenshot(
                         url, save_dir, self.log, self.set_progress,
-                        self.stop_event, filter_text))
+                        self.stop_event, filter_text, api_key))
                 else:
                     asyncio.run(run_download(
                         url, save_dir, self.log, self.set_progress,
-                        self.stop_event, filter_text))
+                        self.stop_event, filter_text, api_key))
             except Exception as e:
                 self.log(f"\n오류: {e}")
             finally:

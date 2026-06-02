@@ -9,6 +9,8 @@ import time
 import requests
 from pathlib import Path
 
+from vision_matcher import fetch_and_check, check_image_matches
+
 BASE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 }
@@ -80,19 +82,65 @@ def extract_og_images(html: str, base_url: str) -> list:
     return urls
 
 
-def apply_filter(projects: list, filter_text: str, log_fn) -> list:
-    """filter_text가 있으면 title/summary에 포함된 항목만 반환"""
+def _text_matches(proj: dict, keyword: str) -> bool:
+    kw = keyword.lower()
+    fields = ["seed_title", "seed_summary", "seed_tags", "seed_category"]
+    return any(kw in (proj.get(f) or "").lower() for f in fields)
+
+
+def _thumb_url(proj: dict, base_url: str) -> str:
+    """포트폴리오 항목 썸네일 URL 반환"""
+    for key in ("file_org_src", "file_src", "thumb_src"):
+        src = proj.get(key) or ""
+        if src:
+            src = src.replace("\\/", "/")
+            if not src.startswith("http"):
+                src = base_url.rstrip("/") + "/" + src.lstrip("/")
+            return src
+    return ""
+
+
+def apply_filter(projects: list, filter_text: str, api_key: str,
+                 base_url: str, log_fn) -> list:
+    """
+    1단계: 텍스트 매칭 (빠름)
+    2단계: 텍스트 미매칭 항목 → 썸네일 이미지 Vision 매칭 (api_key 있을 때만)
+    """
     if not filter_text:
         return projects
-    ft = filter_text.lower()
-    filtered = [
-        p for p in projects
-        if ft in (p.get("seed_title") or "").lower()
-        or ft in (p.get("seed_summary") or "").lower()
-        or ft in (p.get("seed_tags") or "").lower()
-    ]
-    log_fn(f"필터 '{filter_text}': {len(filtered)}/{len(projects)}개 해당")
-    return filtered
+
+    text_matched = []
+    vision_candidates = []
+
+    for proj in projects:
+        if _text_matches(proj, filter_text):
+            text_matched.append(proj)
+        else:
+            vision_candidates.append(proj)
+
+    log_fn(f"텍스트 매칭: {len(text_matched)}개")
+
+    vision_matched = []
+    if api_key and vision_candidates:
+        log_fn(f"이미지 AI 분석: {len(vision_candidates)}개 대상...")
+        for i, proj in enumerate(vision_candidates, 1):
+            thumb = _thumb_url(proj, base_url)
+            title = (proj.get("seed_title") or f"항목{i}").strip()
+            if thumb:
+                matched = fetch_and_check(thumb, filter_text, api_key, base_url)
+                if matched:
+                    log_fn(f"  ✓ 이미지 매칭: {title}")
+                    vision_matched.append(proj)
+                else:
+                    log_fn(f"  ✗ 미매칭: {title}")
+            else:
+                log_fn(f"  - 썸네일 없음: {title}")
+    elif vision_candidates and not api_key:
+        log_fn(f"  (AI 분석 키 없음 — 텍스트 매칭만 사용)")
+
+    result = text_matched + vision_matched
+    log_fn(f"최종 매칭: {len(result)}개  (텍스트 {len(text_matched)} + 이미지AI {len(vision_matched)})\n")
+    return result
 
 
 async def click_more_buttons(page, log_fn):
@@ -123,7 +171,6 @@ async def click_more_buttons(page, log_fn):
 
 
 async def click_next_page(page) -> bool:
-    """다음 페이지 버튼 클릭. 없으면 False 반환"""
     selectors = [
         "a:has-text('다음')", "button:has-text('다음')",
         ".next", "[class*='next']", "a[aria-label='Next']",
@@ -146,7 +193,7 @@ async def click_next_page(page) -> bool:
 # ══════════════════════════════════════════════
 
 async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event,
-                       filter_text: str = ""):
+                       filter_text: str = "", api_key: str = ""):
     from playwright.async_api import async_playwright
 
     base_url = get_base_url(url)
@@ -162,7 +209,6 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
 
         projects = parse_portfolio_list(html)
 
-        # ── 포트폴리오 목록 구조 없음 → 현재 페이지 이미지 직접 다운 ──
         if not projects:
             log_fn("포트폴리오 목록 없음 → 페이지 이미지 전체 다운로드")
             img_urls = extract_og_images(html, base_url)
@@ -174,7 +220,12 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
                 """)
                 img_urls = list(dict.fromkeys(img_tags))
 
-            log_fn(f"이미지 {len(img_urls)}개 발견")
+            # 필터 적용 (Vision 포함)
+            if filter_text and img_urls:
+                img_urls = await _vision_filter_urls(
+                    img_urls, filter_text, api_key, base_url, log_fn)
+
+            log_fn(f"이미지 {len(img_urls)}개 저장")
             save_dir.mkdir(parents=True, exist_ok=True)
             ok = 0
             for i, img_url in enumerate(img_urls, 1):
@@ -193,8 +244,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
             await browser.close()
             return
 
-        # ── 포트폴리오 목록 구조 있음 → 필터 후 상세 페이지 순회 ──
-        projects = apply_filter(projects, filter_text, log_fn)
+        projects = apply_filter(projects, filter_text, api_key, base_url, log_fn)
         log_fn(f"프로젝트 {len(projects)}개 처리 시작\n")
         save_dir.mkdir(parents=True, exist_ok=True)
         title_counter = {}
@@ -231,11 +281,8 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
                     log_fn(f"  오류: {e}")
 
             if not img_urls:
-                src = proj.get("file_org_src") or proj.get("file_src") or ""
+                src = _thumb_url(proj, base_url)
                 if src:
-                    src = src.replace("\\/", "/")
-                    if not src.startswith("http"):
-                        src = base_url + src
                     img_urls = [src]
 
             log_fn(f"  이미지 {len(img_urls)}개")
@@ -269,7 +316,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
 # ══════════════════════════════════════════════
 
 async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_event,
-                         filter_text: str = ""):
+                         filter_text: str = "", api_key: str = ""):
     from playwright.async_api import async_playwright
 
     base_url = get_base_url(url)
@@ -285,23 +332,20 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
 
         projects = parse_portfolio_list(html)
 
-        # ── 포트폴리오 목록 없음 → 스크롤 캡처 ──
         if not projects:
             log_fn("포트폴리오 목록 없음 → 스크롤 캡처 모드")
             save_dir.mkdir(parents=True, exist_ok=True)
 
             if filter_text:
-                # 텍스트 포함 요소만 골라서 캡처
-                await _capture_by_text(page, save_dir, filter_text, log_fn, progress_fn, stop_event)
+                await _capture_filtered(page, save_dir, filter_text, api_key,
+                                        base_url, log_fn, progress_fn, stop_event)
             else:
-                # 페이지 전체를 스크롤하면서 뷰포트 단위 캡처
                 await _scroll_capture(page, save_dir, log_fn, progress_fn, stop_event)
 
             await browser.close()
             return
 
-        # ── 포트폴리오 목록 있음 → 필터 후 상세 페이지 스크린샷 ──
-        projects = apply_filter(projects, filter_text, log_fn)
+        projects = apply_filter(projects, filter_text, api_key, base_url, log_fn)
         log_fn(f"캡처 대상: {len(projects)}개\n")
         save_dir.mkdir(parents=True, exist_ok=True)
         title_counter = {}
@@ -329,7 +373,6 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
                 try:
                     await page.goto(detail_url, wait_until="networkidle", timeout=30000)
                     await page.wait_for_timeout(500)
-
                     screenshot_path = save_dir / f"{idx:03d}_{folder_name}.png"
                     await page.screenshot(path=str(screenshot_path), full_page=True)
                     size_kb = screenshot_path.stat().st_size // 1024
@@ -345,40 +388,107 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
         await browser.close()
 
 
-async def _capture_by_text(page, save_dir: Path, filter_text: str, log_fn,
-                            progress_fn, stop_event):
-    """페이지에서 filter_text 포함 요소를 찾아 각각 스크린샷"""
-    log_fn(f"'{filter_text}' 포함 요소 탐색 중...")
-    locator = page.locator(f"text={filter_text}")
-    count = await locator.count()
+# ══════════════════════════════════════════════
+#  내부 헬퍼
+# ══════════════════════════════════════════════
 
-    if count == 0:
-        log_fn(f"  '{filter_text}' 텍스트를 포함한 요소를 찾지 못했습니다.")
-        return
+async def _vision_filter_urls(img_urls: list, keyword: str, api_key: str,
+                               base_url: str, log_fn) -> list:
+    """이미지 URL 목록을 Vision으로 필터링"""
+    if not api_key:
+        log_fn("AI 분석 키 없음 — 전체 이미지 사용")
+        return img_urls
 
-    log_fn(f"  {count}개 발견")
-    ok = 0
-    for i in range(count):
+    log_fn(f"이미지 {len(img_urls)}개 AI 분석 중...")
+    matched = []
+    for i, img_url in enumerate(img_urls, 1):
+        ok = fetch_and_check(img_url, keyword, api_key, base_url)
+        if ok:
+            log_fn(f"  [{i:03d}] ✓ 매칭")
+            matched.append(img_url)
+        else:
+            log_fn(f"  [{i:03d}] ✗ 미매칭")
+    log_fn(f"AI 매칭 결과: {len(matched)}/{len(img_urls)}개")
+    return matched
+
+
+async def _capture_filtered(page, save_dir: Path, filter_text: str, api_key: str,
+                             base_url: str, log_fn, progress_fn, stop_event):
+    """
+    텍스트 매칭 → 없으면 이미지 Vision 매칭 → 매칭된 요소 캡처
+    """
+    # 1. 텍스트 포함 요소 찾기
+    text_locs = []
+    try:
+        loc = page.locator(f"text={filter_text}")
+        cnt = await loc.count()
+        text_locs = [loc.nth(i) for i in range(cnt)]
+    except Exception:
+        pass
+
+    log_fn(f"텍스트 매칭 요소: {len(text_locs)}개")
+
+    # 2. 텍스트 매칭 요소 캡처
+    saved = 0
+    for i, el in enumerate(text_locs, 1):
         if stop_event.is_set():
-            break
+            return
         try:
-            el = locator.nth(i)
             await el.scroll_into_view_if_needed()
-            await page.wait_for_timeout(600)
-            sp = save_dir / f"{i+1:03d}_match.png"
+            await page.wait_for_timeout(400)
+            sp = save_dir / f"{saved+1:03d}_text.png"
             await el.screenshot(path=str(sp))
-            size_kb = sp.stat().st_size // 1024
-            log_fn(f"  [{i+1:03d}] 캡처 ({size_kb}KB)")
-            ok += 1
+            log_fn(f"  [{saved+1:03d}] 텍스트 캡처 ({sp.stat().st_size // 1024}KB)")
+            saved += 1
         except Exception as e:
-            log_fn(f"  [{i+1:03d}] 오류: {e}")
-        progress_fn(i + 1, count)
+            log_fn(f"  텍스트 요소 캡처 오류: {e}")
 
-    log_fn(f"\n완료! {ok}/{count}개 캡처")
+    # 3. 페이지 내 모든 이미지 Vision 분석
+    if api_key:
+        log_fn("이미지 Vision 분석 시작...")
+        img_elements = await page.locator("img").all()
+        log_fn(f"  이미지 {len(img_elements)}개 분석 대상")
+
+        vision_saved = 0
+        for i, img_el in enumerate(img_elements):
+            if stop_event.is_set():
+                return
+            try:
+                src = await img_el.get_attribute("src") or await img_el.get_attribute("data-src") or ""
+                if not src or src.startswith("data:") or not src.startswith("http"):
+                    continue
+
+                matched = fetch_and_check(src, filter_text, api_key, base_url)
+                if matched:
+                    # 이미지 요소보다 부모 카드/섹션 캡처
+                    parent = img_el.locator("xpath=ancestor::*[contains(@class,'item') or contains(@class,'card') or contains(@class,'portfolio') or contains(@class,'work')][1]")
+                    target = parent if await parent.count() > 0 else img_el
+
+                    await target.scroll_into_view_if_needed()
+                    await page.wait_for_timeout(400)
+                    sp = save_dir / f"{saved+1:03d}_img.png"
+                    await target.screenshot(path=str(sp))
+                    log_fn(f"  [{saved+1:03d}] 이미지 Vision 매칭 캡처 ({sp.stat().st_size // 1024}KB)")
+                    saved += 1
+                    vision_saved += 1
+
+            except Exception as e:
+                log_fn(f"  이미지 분석 오류: {e}")
+
+            progress_fn(i + 1, len(img_elements))
+
+        log_fn(f"Vision 매칭 캡처: {vision_saved}개")
+    else:
+        log_fn("(AI 분석 키 없음 — 이미지 Vision 매칭 생략)")
+
+    if saved == 0:
+        log_fn("매칭 항목 없음")
+    else:
+        log_fn(f"\n완료! 총 {saved}개 캡처 → {save_dir}")
 
 
 async def _scroll_capture(page, save_dir: Path, log_fn, progress_fn, stop_event):
-    """페이지를 스크롤하면서 뷰포트 단위로 캡처, 다음 페이지가 있으면 이동"""
+    """페이지를 스크롤하면서 뷰포트 단위로 캡처, 다음 페이지 이동"""
     page_num = 1
     while True:
         log_fn(f"  페이지 {page_num} 캡처 시작")
@@ -396,14 +506,13 @@ async def _scroll_capture(page, save_dir: Path, log_fn, progress_fn, stop_event)
             sp = save_dir / f"p{page_num:02d}_{shot_idx:03d}.png"
             await page.screenshot(
                 path=str(sp),
-                clip={"x": 0, "y": y, "width": 1440, "height": min(viewport_h, total_height - y)}
+                clip={"x": 0, "y": y, "width": 1440,
+                      "height": min(viewport_h, total_height - y)}
             )
-            size_kb = sp.stat().st_size // 1024
-            log_fn(f"  p{page_num}-{shot_idx:03d} ({size_kb}KB)")
+            log_fn(f"  p{page_num}-{shot_idx:03d} ({sp.stat().st_size // 1024}KB)")
             y += viewport_h
             shot_idx += 1
 
-        # 다음 페이지 시도
         moved = await click_next_page(page)
         if not moved:
             break
