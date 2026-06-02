@@ -25,10 +25,40 @@ _STEALTH_ARGS = [
 ]
 
 _STEALTH_SCRIPT = """
+    // webdriver 제거
     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+    // 플러그인/언어 위장
     Object.defineProperty(navigator, 'plugins',   {get: () => [1,2,3,4,5]});
     Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR','ko','en-US','en']});
-    window.chrome = { runtime: {} };
+
+    // Chrome runtime 완전체 (네이버는 이걸 검사함)
+    window.chrome = {
+        app: { isInstalled: false },
+        runtime: {
+            OnMessageEvent: function(){},
+            connect:        function(){},
+            sendMessage:    function(){},
+            id: undefined
+        }
+    };
+
+    // headless 에서 outerHeight/Width = 0 → 실제 viewport로 덮어쓰기
+    Object.defineProperty(window, 'outerHeight', {get: () => window.innerHeight || 1080});
+    Object.defineProperty(window, 'outerWidth',  {get: () => window.innerWidth  || 1920});
+
+    // Permissions API (headless 감지 우회)
+    if (navigator.permissions && navigator.permissions.query) {
+        const _origQuery = navigator.permissions.query.bind(navigator.permissions);
+        navigator.permissions.query = (p) =>
+            p.name === 'notifications'
+                ? Promise.resolve({state: Notification.permission})
+                : _origQuery(p);
+    }
+
+    // 하드웨어 동시성 (headless=1 → 4로 위장)
+    Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 4});
+    Object.defineProperty(navigator, 'deviceMemory',        {get: () => 8});
 """
 
 
@@ -409,20 +439,37 @@ async def extract_all_images(page, log_fn) -> list:
             if (/\.(jpe?g|png|webp|gif|bmp|tiff|avif)(\?|$)/i.test(h)) add(h);
         });
 
-        // ── 8. JSON-LD / 스크립트 내 이미지 URL 추출 ─
+        // ── 8. JSON-LD / script 내 이미지 URL 추출 ──
+        // JSON 객체/배열을 재귀 순회해서 이미지 URL 추출
+        function flattenObj(obj, depth) {
+            if (!obj || depth > 10) return;
+            if (typeof obj === 'string') {
+                if (/^https?:[^\s"'<>]+\.(jpe?g|png|webp|gif|bmp|avif)/i.test(obj)) add(obj);
+                return;
+            }
+            if (Array.isArray(obj)) { obj.forEach(v => flattenObj(v, depth+1)); return; }
+            if (typeof obj === 'object') { Object.values(obj).forEach(v => flattenObj(v, depth+1)); }
+        }
+
+        // JSON-LD
         document.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
-            try {
-                const data = JSON.parse(s.textContent);
-                const flatten = (obj) => {
-                    if (!obj || typeof obj !== 'object') return;
-                    for (const v of Object.values(obj)) {
-                        if (typeof v === 'string' && /^https?:.*\.(jpe?g|png|webp|gif)/i.test(v)) add(v);
-                        else flatten(v);
-                    }
-                };
-                flatten(data);
-            } catch(e) {}
+            try { flattenObj(JSON.parse(s.textContent), 0); } catch(e) {}
         });
+
+        // __NEXT_DATA__ (Next.js: 네이버 스마트스토어, 무신사, 29cm 등)
+        const nextDataEl = document.getElementById('__NEXT_DATA__');
+        if (nextDataEl) {
+            try { flattenObj(JSON.parse(nextDataEl.textContent), 0); } catch(e) {}
+        }
+
+        // window.__NUXT__ (Nuxt.js)
+        try { if (window.__NUXT__) flattenObj(window.__NUXT__, 0); } catch(e) {}
+
+        // window 전역 SSR 상태 패턴 (Redux/Vuex)
+        for (const key of ['__INITIAL_STATE__','__STATE__','__PRELOADED_STATE__',
+                           '__APP_STATE__','__REDUX_STATE__','__STORE__']) {
+            try { if (window[key]) flattenObj(window[key], 0); } catch(e) {}
+        }
 
         return out;
     }
