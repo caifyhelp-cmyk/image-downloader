@@ -21,11 +21,13 @@ _STEALTH_ARGS = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
     "--disable-infobars",
-    "--window-size=1920,1080",
-    "--window-position=-32000,0",   # 화면 밖 → 사용자에게 안 보임
+    "--window-size=1280,800",
+    "--start-minimized",            # 작업표시줄로 최소화 (화면 차지 안 함)
     "--disable-gpu-sandbox",
-    "--disable-software-rasterizer",
 ]
+
+# 영구 프로필 경로 (쿠키/세션 누적 저장)
+_BROWSER_PROFILE = Path.home() / ".imgdl_browser"
 
 _STEALTH_SCRIPT = """
     // webdriver 제거
@@ -67,66 +69,72 @@ _STEALTH_SCRIPT = """
 
 async def _launch_browser(p, log_fn=None):
     """
-    브라우저 실행 우선순위:
-    1. Microsoft Edge  (Windows 10/11 기본 설치)
-    2. 시스템 Chrome
-    3. ms-playwright chromium (재귀 탐색)
-    4. playwright 기본 경로 (개발 환경)
+    영구 프로필(~/.imgdl_browser)로 브라우저 실행.
+    쿠키/세션이 누적되므로 네이버 등 쿠키 요구 사이트도 정상 접속.
+    launch_persistent_context → BrowserContext 반환.
     """
     from browser_setup import system_chrome, find_ms_playwright_chromium
+
+    _BROWSER_PROFILE.mkdir(exist_ok=True)
 
     def _log(msg):
         if log_fn:
             log_fn(msg)
 
-    # headless=False: 실제 렌더링 → 네이버/쿠팡 등 headless 탐지 우회
-    # --window-position=-32000,0 으로 화면 밖에 띄워 사용자에게 안 보임
-
-    # 1. Microsoft Edge (Windows 기본 내장)
-    try:
-        _log("브라우저: Edge 시도...")
-        return await p.chromium.launch(headless=False, channel="msedge", args=_STEALTH_ARGS)
-    except Exception as e:
-        _log(f"Edge 없음: {e}")
-
-    # 2. 시스템 Chrome
-    chrome = system_chrome()
-    if chrome:
-        try:
-            _log(f"브라우저: Chrome 시도...")
-            return await p.chromium.launch(headless=False, executable_path=chrome, args=_STEALTH_ARGS)
-        except Exception as e:
-            _log(f"Chrome 실패: {e}")
-
-    # 3. ms-playwright chromium (재귀 탐색)
-    exe = find_ms_playwright_chromium()
-    if exe:
-        try:
-            _log(f"브라우저: Chromium 시도...")
-            return await p.chromium.launch(headless=False, executable_path=exe, args=_STEALTH_ARGS)
-        except Exception as e:
-            _log(f"Chromium 실패: {e}")
-
-    # 4. 개발 환경 fallback
-    _log("브라우저: 기본 경로 시도...")
-    return await p.chromium.launch(headless=False, args=_STEALTH_ARGS)
-
-
-async def _new_stealth_page(browser):
-    """봇 탐지 우회 설정이 적용된 페이지 생성"""
-    ctx = await browser.new_context(
+    common_kw = dict(
+        headless=False,
+        args=_STEALTH_ARGS,
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+            "Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
         ),
-        viewport={"width": 1920, "height": 1080},
+        viewport={"width": 1280, "height": 800},
         locale="ko-KR",
         extra_http_headers={
             "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        }
+        },
     )
+
+    # 1. Edge + 영구 프로필
+    try:
+        _log("브라우저: Edge 시도...")
+        return await p.chromium.launch_persistent_context(
+            str(_BROWSER_PROFILE), channel="msedge", **common_kw)
+    except Exception as e:
+        _log(f"Edge 없음: {e}")
+
+    # 2. Chrome + 영구 프로필
+    chrome = system_chrome()
+    if chrome:
+        try:
+            _log("브라우저: Chrome 시도...")
+            return await p.chromium.launch_persistent_context(
+                str(_BROWSER_PROFILE), executable_path=chrome, **common_kw)
+        except Exception as e:
+            _log(f"Chrome 실패: {e}")
+
+    # 3. Chromium + 영구 프로필
+    exe = find_ms_playwright_chromium()
+    if exe:
+        try:
+            _log("브라우저: Chromium 시도...")
+            return await p.chromium.launch_persistent_context(
+                str(_BROWSER_PROFILE), executable_path=exe, **common_kw)
+        except Exception as e:
+            _log(f"Chromium 실패: {e}")
+
+    # 4. fallback (fresh context)
+    _log("브라우저: 기본 모드...")
+    return await p.chromium.launch_persistent_context(str(_BROWSER_PROFILE), **common_kw)
+
+
+async def _new_stealth_page(ctx):
+    """
+    BrowserContext에서 스텔스 페이지 생성.
+    launch_persistent_context는 BrowserContext를 직접 반환하므로
+    new_context() 없이 바로 new_page() 호출.
+    """
     page = await ctx.new_page()
     await page.add_init_script(_STEALTH_SCRIPT)
     return page
@@ -853,8 +861,8 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
         log_fn("  직접 파싱 실패 → 브라우저 모드로 전환")
 
     async with async_playwright() as p:
-        browser = await _launch_browser(p, log_fn)
-        page = await _new_stealth_page(browser)
+        ctx = await _launch_browser(p, log_fn)
+        page = await _new_stealth_page(ctx)
 
         log_fn(f"접속 중: {url}")
         await goto_and_wait(page, url, log_fn)
@@ -899,7 +907,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
                 progress_fn(i, len(img_urls))
                 time.sleep(0.2)
             log_fn(f"\n완료! {ok}/{len(img_urls)}개 저장")
-            await browser.close()
+            await ctx.close()
             return
 
         projects = apply_filter(projects, filter_text, api_key, base_url, log_fn)
@@ -966,7 +974,7 @@ async def run_download(url: str, save_dir: Path, log_fn, progress_fn, stop_event
         log_fn(f"완료!  프로젝트: {len(projects)}개")
         log_fn(f"성공: {total_ok}개  /  실패: {total_fail}개")
         log_fn(f"저장: {save_dir}")
-        await browser.close()
+        await ctx.close()
 
 
 # ══════════════════════════════════════════════
@@ -981,8 +989,8 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
     base_url = get_base_url(url)
 
     async with async_playwright() as p:
-        browser = await _launch_browser(p, log_fn)
-        page = await _new_stealth_page(browser)
+        ctx = await _launch_browser(p, log_fn)
+        page = await _new_stealth_page(ctx)
 
         log_fn(f"접속 중: {url}")
         await goto_and_wait(page, url, log_fn)
@@ -1003,7 +1011,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
             else:
                 await _scroll_capture(page, save_dir, log_fn, progress_fn, stop_event)
 
-            await browser.close()
+            await ctx.close()
             return
 
         projects = apply_filter(projects, filter_text, api_key, base_url, log_fn)
@@ -1046,7 +1054,7 @@ async def run_screenshot(url: str, save_dir: Path, log_fn, progress_fn, stop_eve
             progress_fn(idx, len(projects))
 
         log_fn(f"\n완료! {save_dir}")
-        await browser.close()
+        await ctx.close()
 
 
 # ══════════════════════════════════════════════
