@@ -2,6 +2,8 @@
 다운로드 핵심 로직
 """
 
+import browser_setup  # noqa: F401 — PLAYWRIGHT_BROWSERS_PATH 환경변수 세팅
+
 import asyncio
 import json
 import re

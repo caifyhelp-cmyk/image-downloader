@@ -3,6 +3,9 @@
 GitHub: caifyhelp-cmyk/image-downloader
 """
 
+# ── 브라우저 경로 고정 (PyInstaller 임시폴더 문제 해결) ──
+import browser_setup  # noqa: F401 — 임포트 자체로 env 세팅됨
+
 import asyncio
 import json
 import os
@@ -389,7 +392,11 @@ class App(tk.Tk):
 
     def _start(self):
         if not PLAYWRIGHT_OK:
-            self.log("playwright 설치 필요: pip install playwright && python -m playwright install chromium")
+            self.log("playwright 패키지 없음: pip install playwright")
+            return
+        from browser_setup import _chromium_exists
+        if not _chromium_exists():
+            self.log("브라우저 설치 중입니다. 잠시 후 다시 시도해주세요...")
             return
         url = self.url_var.get().strip()
         if not url.startswith("http"):
@@ -453,9 +460,17 @@ class App(tk.Tk):
 
     def _check_playwright(self):
         if not PLAYWRIGHT_OK:
-            self.log("⚠ playwright 미설치 — 터미널에서 실행:")
-            self.log("  pip install playwright")
-            self.log("  python -m playwright install chromium\n")
+            self.log("⚠ playwright 패키지 없음 — 개발 환경에서 실행:")
+            self.log("  pip install playwright\n")
+            return
+
+        # 브라우저 없으면 자동 설치
+        from browser_setup import ensure_browser
+        ensure_browser(
+            log_fn=self.log,
+            on_ready=lambda: None,
+            on_fail=lambda msg: self.log(f"⚠ {msg}")
+        )
 
 
 # ══════════════════════════════════════════════

@@ -32,8 +32,10 @@ jobs:
             --name "ImageDownloader" `
             --hidden-import=playwright `
             --hidden-import=playwright.async_api `
+            --hidden-import=playwright._impl._driver `
             --hidden-import=packaging `
             --add-data "version.py;." `
+            --add-data "browser_setup.py;." `
             app.py
 
       - name: GitHub Release 생성 및 exe 업로드
