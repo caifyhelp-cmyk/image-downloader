@@ -17,6 +17,74 @@ from version import VERSION, REPO
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 
 
+def _fetch_latest() -> tuple:
+    """(latest_ver, dl_url) 반환. 최신이거나 실패 시 ("", "")"""
+    res = requests.get(API_URL, timeout=8,
+                       headers={"Accept": "application/vnd.github+json"})
+    if res.status_code != 200:
+        return "", ""
+    data = res.json()
+    latest_tag = data.get("tag_name", "").lstrip("v")
+    if not latest_tag or not Version(latest_tag) > Version(VERSION):
+        return latest_tag, ""
+    assets = data.get("assets", [])
+    dl_url = next((a["browser_download_url"] for a in assets
+                   if a["name"].lower().endswith(".exe")), "")
+    return latest_tag, dl_url
+
+
+def check_update_once(callback):
+    """
+    수동 업데이트 확인용.
+    callback(status_msg: str, dl_url: str) — dl_url 비어있으면 최신 버전
+    """
+    def _run():
+        try:
+            latest, dl_url = _fetch_latest()
+            if not latest:
+                callback("확인 실패", "")
+            elif not dl_url:
+                callback(f"최신 버전입니다 (v{VERSION})", "")
+            else:
+                callback(f"새 버전 v{latest} 있음", dl_url)
+        except Exception as e:
+            callback(f"오류: {e}", "")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def download_and_apply(dl_url: str, log_fn, fail_fn):
+    """수동 업데이트 다운로드 + 교체 + 재시작"""
+    def _run():
+        try:
+            res = requests.get(dl_url, timeout=120, stream=True)
+            res.raise_for_status()
+            total = int(res.headers.get("content-length", 0))
+            downloaded = 0
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".exe")
+            for chunk in res.iter_content(chunk_size=65536):
+                tmp.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    pct = int(downloaded / total * 100)
+                    log_fn(f"다운로드 {pct}%...")
+            tmp.close()
+            log_fn("완료. 재시작 중...")
+
+            if getattr(sys, "frozen", False):
+                current_exe = Path(sys.executable)
+                batch = _make_swap_batch(current_exe, Path(tmp.name))
+                subprocess.Popen(
+                    ["cmd", "/c", _short(batch)],
+                    creationflags=0x00000008 | 0x08000000
+                )
+                os._exit(0)
+            else:
+                log_fn(f"[개발 모드] 새 exe: {tmp.name}")
+        except Exception as e:
+            fail_fn(f"실패: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
 # ──────────────────────────────────────────────
 #  한글 경로 → 8.3 단축경로 (cmd.exe ASCII 호환)
 # ──────────────────────────────────────────────
@@ -51,30 +119,15 @@ def check_and_auto_update(log_fn, on_complete):
     def _run():
         try:
             log_fn("업데이트 확인 중...")
-            res = requests.get(API_URL, timeout=8,
-                               headers={"Accept": "application/vnd.github+json"})
-            if res.status_code != 200:
-                log_fn(f"서버 응답 오류 ({res.status_code}), 앱 시작")
-                on_complete()
-                return
+            latest_tag, dl_url = _fetch_latest()
 
-            data = res.json()
-            latest_tag = data.get("tag_name", "").lstrip("v")
             if not latest_tag:
-                on_complete()
-                return
-
-            if not Version(latest_tag) > Version(VERSION):
                 log_fn(f"최신 버전입니다 (v{VERSION})")
                 on_complete()
                 return
 
-            # 새 버전 발견
-            assets = data.get("assets", [])
-            dl_url = next((a["browser_download_url"] for a in assets
-                           if a["name"].lower().endswith(".exe")), "")
             if not dl_url:
-                log_fn("릴리즈에 exe 파일 없음, 앱 시작")
+                log_fn(f"최신 버전입니다 (v{VERSION})")
                 on_complete()
                 return
 

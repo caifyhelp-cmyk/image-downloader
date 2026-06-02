@@ -122,6 +122,18 @@ class App(tk.Tk):
         tk.Label(hdr, text=f"v{VERSION}",
                  bg=CARD, fg=FG2, font=("Malgun Gothic", 10)).pack(side="left", padx=4)
 
+        # 업데이트 버튼 (헤더 우측)
+        self._update_url = ""
+        self._upd_btn = tk.Button(
+            hdr, text=" 업데이트 확인 ",
+            bg=CARD, fg=FG2, relief="flat",
+            font=("Malgun Gothic", 9), padx=10, pady=4,
+            command=self._check_update_manual, cursor="hand2")
+        self._upd_btn.pack(side="right", padx=12)
+        self._upd_label = tk.Label(hdr, text="", bg=CARD, fg=FG2,
+                                   font=("Malgun Gothic", 9))
+        self._upd_label.pack(side="right", padx=4)
+
         # 본문
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True, padx=24, pady=16)
@@ -282,6 +294,55 @@ class App(tk.Tk):
                  ).grid(row=row, column=0, sticky="ne", pady=8)
 
     # ── 이벤트 ────────────────────────────────
+    # ── 수동 업데이트 ─────────────────────────
+    def _check_update_manual(self):
+        self._upd_btn.config(state="disabled", text=" 확인 중... ")
+        self._upd_label.config(text="", fg=FG2)
+
+        from updater import check_update_once
+
+        def _done(status: str, dl_url: str):
+            def _ui():
+                if dl_url:
+                    # 새 버전 있음
+                    self._update_url = dl_url
+                    self._upd_label.config(text=status, fg=YELLOW)
+                    self._upd_btn.config(
+                        state="normal", text=" ↓ 지금 업데이트 ",
+                        bg=YELLOW, fg="#1a1a2e",
+                        font=("Malgun Gothic", 9, "bold"),
+                        command=self._do_update)
+                else:
+                    self._upd_label.config(text=status, fg=FG2)
+                    self._upd_btn.config(state="normal", text=" 업데이트 확인 ",
+                                         bg=CARD, fg=FG2,
+                                         font=("Malgun Gothic", 9),
+                                         command=self._check_update_manual)
+            self.after(0, _ui)
+
+        check_update_once(callback=_done)
+
+    def _do_update(self):
+        if not self._update_url:
+            return
+        self._upd_btn.config(state="disabled", text=" 업데이트 중... ")
+        self._upd_label.config(text="", fg=FG2)
+
+        from updater import download_and_apply
+
+        def _log(msg):
+            self._upd_label.config(text=msg, fg=YELLOW)
+            self.after(0, lambda: None)  # UI 갱신 트리거
+
+        def _fail(msg):
+            def _ui():
+                self._upd_label.config(text=msg, fg=RED)
+                self._upd_btn.config(state="normal", text=" ↓ 지금 업데이트 ",
+                                     command=self._do_update)
+            self.after(0, _ui)
+
+        download_and_apply(self._update_url, _log, _fail)
+
     def _paste_url(self):
         try:
             text = self.clipboard_get().strip()
