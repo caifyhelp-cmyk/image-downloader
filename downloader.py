@@ -22,6 +22,9 @@ _STEALTH_ARGS = [
     "--disable-dev-shm-usage",
     "--disable-infobars",
     "--window-size=1920,1080",
+    "--window-position=-32000,0",   # 화면 밖 → 사용자에게 안 보임
+    "--disable-gpu-sandbox",
+    "--disable-software-rasterizer",
 ]
 
 _STEALTH_SCRIPT = """
@@ -76,10 +79,13 @@ async def _launch_browser(p, log_fn=None):
         if log_fn:
             log_fn(msg)
 
+    # headless=False: 실제 렌더링 → 네이버/쿠팡 등 headless 탐지 우회
+    # --window-position=-32000,0 으로 화면 밖에 띄워 사용자에게 안 보임
+
     # 1. Microsoft Edge (Windows 기본 내장)
     try:
         _log("브라우저: Edge 시도...")
-        return await p.chromium.launch(headless=True, channel="msedge", args=_STEALTH_ARGS)
+        return await p.chromium.launch(headless=False, channel="msedge", args=_STEALTH_ARGS)
     except Exception as e:
         _log(f"Edge 없음: {e}")
 
@@ -88,7 +94,7 @@ async def _launch_browser(p, log_fn=None):
     if chrome:
         try:
             _log(f"브라우저: Chrome 시도...")
-            return await p.chromium.launch(headless=True, executable_path=chrome, args=_STEALTH_ARGS)
+            return await p.chromium.launch(headless=False, executable_path=chrome, args=_STEALTH_ARGS)
         except Exception as e:
             _log(f"Chrome 실패: {e}")
 
@@ -97,13 +103,13 @@ async def _launch_browser(p, log_fn=None):
     if exe:
         try:
             _log(f"브라우저: Chromium 시도...")
-            return await p.chromium.launch(headless=True, executable_path=exe, args=_STEALTH_ARGS)
+            return await p.chromium.launch(headless=False, executable_path=exe, args=_STEALTH_ARGS)
         except Exception as e:
             _log(f"Chromium 실패: {e}")
 
     # 4. 개발 환경 fallback
     _log("브라우저: 기본 경로 시도...")
-    return await p.chromium.launch(headless=True, args=_STEALTH_ARGS)
+    return await p.chromium.launch(headless=False, args=_STEALTH_ARGS)
 
 
 async def _new_stealth_page(browser):

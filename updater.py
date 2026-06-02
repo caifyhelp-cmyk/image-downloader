@@ -75,7 +75,7 @@ def download_and_apply(dl_url: str, log_fn, fail_fn):
                 ps1 = _make_swap_script(current_exe, Path(tmp.name))
                 subprocess.Popen(
                     ["powershell", "-ExecutionPolicy", "Bypass",
-                     "-WindowStyle", "Hidden", "-File", str(ps1)],
+                     "-WindowStyle", "Hidden", "-File", _short(ps1)],
                     creationflags=0x00000008 | 0x08000000
                 )
                 os._exit(0)
@@ -166,7 +166,7 @@ def _download_and_restart(dl_url: str, new_ver: str, log_fn, on_complete):
             ps1 = _make_swap_script(current_exe, new_exe)
             subprocess.Popen(
                 ["powershell", "-ExecutionPolicy", "Bypass",
-                 "-WindowStyle", "Hidden", "-File", str(ps1)],
+                 "-WindowStyle", "Hidden", "-File", _short(ps1)],
                 creationflags=0x00000008 | 0x08000000
             )
             log_fn("업데이트 적용 중... (자동 재시작)")
